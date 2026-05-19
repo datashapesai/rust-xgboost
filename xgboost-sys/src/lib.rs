@@ -4,6 +4,13 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+/// Major version of the XGBoost headers compiled against (from `version_config.h`).
+pub const COMPILE_VER_MAJOR: &str = env!("XGBOOST_VER_MAJOR");
+/// Minor version of the XGBoost headers compiled against (from `version_config.h`).
+pub const COMPILE_VER_MINOR: &str = env!("XGBOOST_VER_MINOR");
+/// Patch version of the XGBoost headers compiled against (from `version_config.h`).
+pub const COMPILE_VER_PATCH: &str = env!("XGBOOST_VER_PATCH");
+
 #[cfg(test)]
 mod tests {
     use super::*;

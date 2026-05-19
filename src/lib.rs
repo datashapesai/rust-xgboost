@@ -80,6 +80,10 @@ pub use dmatrix::DMatrix;
 mod booster;
 pub use booster::{Booster, FeatureMap, FeatureType, PredictConfig, PredictType};
 pub mod parameters;
+
+mod version;
+pub use version::{xgb_version, Version, XGBVersion};
+
 use std::{ffi, path::Path};
 
 #[cfg(not(target_os = "windows"))]

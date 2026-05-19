@@ -1,13 +1,46 @@
 use bindgen;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const GITHUB_URL: &str = "https://github.com/marcomq/rust-xgboost/raw/refs/tags/v3.0.1/xgboost-sys/lib/";
+
+fn emit_version_env(xgb_root: &Path) {
+    let version_config = xgb_root
+        .join("include")
+        .join("xgboost")
+        .join("version_config.h");
+    let contents = fs::read_to_string(&version_config)
+        .unwrap_or_else(|_| panic!("Cannot read {}", version_config.display()));
+
+    for line in contents.lines() {
+        for (define, env_key) in &[
+            ("XGBOOST_VER_MAJOR", "XGBOOST_VER_MAJOR"),
+            ("XGBOOST_VER_MINOR", "XGBOOST_VER_MINOR"),
+            ("XGBOOST_VER_PATCH", "XGBOOST_VER_PATCH"),
+        ] {
+            if let Some(rest) = line
+                .trim()
+                .strip_prefix(&format!("#define {define}"))
+            {
+                let value = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("0")
+                    .trim_end_matches("/*")
+                    .trim();
+                println!("cargo:rustc-env={env_key}={value}");
+            }
+        }
+    }
+}
 
 fn main() {
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
     let xgb_root = Path::new("xgboost").canonicalize().unwrap();
+
+    emit_version_env(&xgb_root);
 
     let wrapper_h = xgb_root.join("include").join("xgboost").join("c_api.h");
     let bindings = bindgen::Builder::default()
