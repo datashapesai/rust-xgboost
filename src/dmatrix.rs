@@ -1,6 +1,21 @@
 use libc::{c_float, c_uint};
 use std::{ffi, path::Path, ptr, slice};
 
+/// Build a JSON-encoded numpy `__array_interface__` string for a 1-D contiguous array.
+///
+/// * `ptr`     – pointer to the first element, cast to `usize`
+/// * `n`       – number of elements
+/// * `typestr` – numpy typestr, e.g. `"<u8"` (u64), `"<u4"` (u32), `"<f4"` (f32)
+fn array_interface(ptr: usize, n: usize, typestr: &str) -> ffi::CString {
+    let json = format!(r#"{{"data": [{ptr}, true], "shape": [{n}, 1], "typestr": "{typestr}", "version": 3}}"#);
+    ffi::CString::new(json).expect("array interface JSON contains NUL byte")
+}
+
+/// Build the JSON config passed to `XGDMatrixCreateFromCSR` / `XGDMatrixCreateFromCSC`.
+fn make_dmatrix_config() -> ffi::CString {
+    ffi::CString::new(r#"{"missing": NaN}"#).expect("config JSON contains NUL byte")
+}
+
 use super::{XGBError, XGBResult};
 
 static KEY_GROUP_PTR: &str = "group_ptr";
@@ -131,15 +146,21 @@ impl DMatrix {
     pub fn from_csr(indptr: &[usize], indices: &[usize], data: &[f32], num_cols: Option<usize>) -> XGBResult<Self> {
         assert_eq!(indices.len(), data.len());
         let mut handle = ptr::null_mut();
-        let indices: Vec<u32> = indices.iter().map(|x| *x as u32).collect();
-        let num_cols = num_cols.unwrap_or(0); // infer from data if 0
-        xgb_call!(xgboost_sys::XGDMatrixCreateFromCSREx(
-            indptr.as_ptr(),
-            indices.as_ptr(),
-            data.as_ptr(),
-            indptr.len(),
-            data.len(),
+        // Convert column indices to u32 as required by the XGBoost C API.
+        let indices_u32: Vec<u32> = indices.iter().map(|&x| x as u32).collect();
+        let num_cols = num_cols.unwrap_or(0) as xgboost_sys::bst_ulong;
+
+        let j_indptr = array_interface(indptr.as_ptr() as usize, indptr.len(), "<u8");
+        let j_indices = array_interface(indices_u32.as_ptr() as usize, indices_u32.len(), "<u4");
+        let j_data = array_interface(data.as_ptr() as usize, data.len(), "<f4");
+        let config = make_dmatrix_config();
+
+        xgb_call!(xgboost_sys::XGDMatrixCreateFromCSR(
+            j_indptr.as_ptr(),
+            j_indices.as_ptr(),
+            j_data.as_ptr(),
             num_cols,
+            config.as_ptr(),
             &mut handle
         ))?;
         DMatrix::new(handle)
@@ -156,15 +177,21 @@ impl DMatrix {
     pub fn from_csc(indptr: &[usize], indices: &[usize], data: &[f32], num_rows: Option<usize>) -> XGBResult<Self> {
         assert_eq!(indices.len(), data.len());
         let mut handle = ptr::null_mut();
-        let indices: Vec<u32> = indices.iter().map(|x| *x as u32).collect();
-        let num_rows = num_rows.unwrap_or(0); // infer from data if 0
-        xgb_call!(xgboost_sys::XGDMatrixCreateFromCSCEx(
-            indptr.as_ptr(),
-            indices.as_ptr(),
-            data.as_ptr(),
-            indptr.len(),
-            data.len(),
+        // Convert row indices to u32 as required by the XGBoost C API.
+        let indices_u32: Vec<u32> = indices.iter().map(|&x| x as u32).collect();
+        let num_rows = num_rows.unwrap_or(0) as xgboost_sys::bst_ulong;
+
+        let j_indptr = array_interface(indptr.as_ptr() as usize, indptr.len(), "<u8");
+        let j_indices = array_interface(indices_u32.as_ptr() as usize, indices_u32.len(), "<u4");
+        let j_data = array_interface(data.as_ptr() as usize, data.len(), "<f4");
+        let config = make_dmatrix_config();
+
+        xgb_call!(xgboost_sys::XGDMatrixCreateFromCSC(
+            j_indptr.as_ptr(),
+            j_indices.as_ptr(),
+            j_data.as_ptr(),
             num_rows,
+            config.as_ptr(),
             &mut handle
         ))?;
         DMatrix::new(handle)
