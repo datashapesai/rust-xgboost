@@ -1,6 +1,6 @@
 [package]
 name = "xgb"
-version = "3.0.5"
+version = "3.0.5-dsai"
 authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
 license = "MIT"
 repository = "https://github.com/marcomq/rust-xgboost"
@@ -9,9 +9,10 @@ description = "Machine learning using XGBoost"
 documentation = "https://docs.rs/xgboost_lib"
 readme = "README.md"
 edition = "2021"
+publish = ["ge"]
 
 [dependencies]
-xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.0.4" }
+xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.0.5-dsai", registry = "ge" }
 libc = "0.2"
 derive_builder = "0.20"
 log = "0.4"
