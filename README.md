@@ -139,9 +139,52 @@ Prebuilt lib and built locally:
 
 Prebuilt lib only
 
-* Windows 
+* Windows
+* Android (arm64-v8a)
 
 Local windows built is possible, but steps may require manual copy of VS output files.
+
+## Android (arm64-v8a)
+
+A prebuilt static `libxgboost.a` (API level 26+, OpenMP disabled) is bundled in
+`xgboost-sys/lib/android_arm64/`. The `use_prebuilt_xgb` feature (enabled by default) picks it
+up automatically when building for `aarch64-linux-android`.
+
+### Prerequisites
+
+1. Install [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
+   ```
+   cargo install cargo-ndk
+   ```
+2. Install the Android target:
+   ```
+   rustup target add aarch64-linux-android
+   ```
+3. Install the Android NDK (e.g. via Android Studio SDK Manager or `sdkmanager`).
+4. Set `ANDROID_NDK_HOME` to the NDK root, e.g.:
+   ```
+   export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/<version>
+   ```
+
+### Running tests
+
+Unit and integration tests run on a connected device or emulator. The test data must be pushed
+to the device first:
+
+```bash
+adb push xgboost-sys/xgboost/demo/data /data/local/tmp/xgboost-sys/xgboost/demo/data
+```
+
+Then run the tests. Because `cargo-ndk-runner` pushes every doctest binary to the same device
+path, doctests must be run single-threaded to avoid collisions:
+
+```bash
+# Unit / integration tests (parallel is fine)
+cargo ndk -t arm64-v8a -P 26 test --lib
+
+# Doctests (must be single-threaded)
+cargo ndk -t arm64-v8a -P 26 test --doc -- --test-threads=1
+```
 
 GPU support on windows:
 
