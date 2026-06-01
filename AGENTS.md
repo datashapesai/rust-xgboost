@@ -193,6 +193,12 @@ cp "$BUILD_DIR/dmlc-core/libdmlc.a"     xgboost-sys/lib/android_arm64/libdmlc.a
 
 # Clean up the build artifact from the submodule so it stays unmodified
 git -C xgboost-sys/xgboost clean -fd lib/
+
+# Strip debug symbols — reduces libxgboost.a from ~162 MB to ~21 MB,
+# keeping it under GitHub's 100 MB file-size limit.
+NDK_STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin/llvm-strip"
+"$NDK_STRIP" --strip-debug xgboost-sys/lib/android_arm64/libxgboost.a
+"$NDK_STRIP" --strip-debug xgboost-sys/lib/android_arm64/libdmlc.a
 ```
 
 **Do not patch `xgboost-sys/xgboost/` sources.** The submodule tracks an
@@ -214,4 +220,5 @@ avoids the NDK OpenMP absence).
 | `No such file or directory` for `xgboost-sys/xgboost/demo/data` | Test binary runs with CWD `/` on device | Use `#[cfg(target_os = "android")]` to switch to absolute `/data/local/tmp/...` path; push data with `adb push` first |
 | `adbd cannot run as root in production builds` | Google Play emulator image | Switch to a Google APIs image, or work around the need for root |
 | `unknown package: 26` from cargo-ndk | Used `-p 26` (cargo package flag) instead of `-P 26` | Use uppercase `-P` for the platform/API level flag |
+| `pre-receive hook declined` / `File … exceeds GitHub's file size limit` | Static archive contains debug symbols (~162 MB) | Run `llvm-strip --strip-debug` on the `.a` files before committing (see rebuild section above) |
 
