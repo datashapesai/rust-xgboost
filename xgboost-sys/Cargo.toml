@@ -1,6 +1,6 @@
 [package]
 name = "xgboost_lib-sys"
-version = "3.0.5-dsai"
+version = "3.0.6-dsai"
 authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
 links = "xgboost"
 build = "build.rs"
