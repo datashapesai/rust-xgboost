@@ -393,8 +393,23 @@ impl Drop for DMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Returns an XGBoost JSON URI for a demo-data file.
+    ///
+    /// On Android, `cargo-ndk-runner` starts the test binary with CWD `/`
+    /// (the read-only root).  Test data must be pushed to
+    /// `/data/local/tmp/xgboost-sys/xgboost/demo/data/` beforehand (e.g.
+    /// `adb push xgboost-sys/xgboost/demo/data /data/local/tmp/xgboost-sys/xgboost/demo/data`).
+    fn demo_data_uri(filename: &str) -> String {
+        #[cfg(target_os = "android")]
+        let base = "/data/local/tmp/xgboost-sys/xgboost/demo/data";
+        #[cfg(not(target_os = "android"))]
+        let base = "xgboost-sys/xgboost/demo/data";
+        format!(r#"{{"uri": "{base}/{filename}?format=libsvm"}}"#)
+    }
+
     fn read_train_matrix() -> XGBResult<DMatrix> {
-        DMatrix::load(r#"{"uri": "xgboost-sys/xgboost/demo/data/agaricus.txt.train?format=libsvm"}"#)
+        DMatrix::load(&demo_data_uri("agaricus.txt.train"))
     }
 
     #[test]
