@@ -110,27 +110,61 @@ fn main() {
                 }
             } else if target.contains("linux") {
                 let arch_dir = if target.contains("aarch64") { "linux_arm64" } else { "linux_amd64" };
-                let local_lib_path = format!("lib/{arch_dir}/libxgboost.a");
-                let local_lib = Path::new(&local_lib_path);
-                if local_lib.exists() {
-                    // Prefer the committed static archive (mirrors the Android arm64 approach).
-                    if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
-                        fs::copy(local_lib, format!("{deps_path}/libxgboost.a"))
-                            .expect("Failed to copy Linux libxgboost.a to deps");
+
+                #[cfg(feature = "static_link")]
+                {
+                    // static_link: copy the committed .a archive so the linker
+                    // can produce a fully self-contained binary (e.g. cargo-deb).
+                    let local_lib_path = format!("lib/{arch_dir}/libxgboost.a");
+                    let local_lib = Path::new(&local_lib_path);
+                    if local_lib.exists() {
+                        if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
+                            fs::copy(local_lib, format!("{deps_path}/libxgboost.a"))
+                                .expect("Failed to copy Linux libxgboost.a to deps");
+                        }
+                        let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
+                        let local_dmlc = Path::new(&local_dmlc_path);
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
+                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
+                                .expect("Failed to copy Linux libdmlc.a to deps");
+                        }
+                    } else {
+                        panic!(
+                            "No prebuilt libxgboost.a found at lib/{arch_dir}/libxgboost.a. \
+                             Build it with `xgboost-sys/scripts/build-linux-static.sh` and \
+                             commit the result, or set $XGBOOST_LIB_DIR to a directory \
+                             containing a libxgboost.a built for target '{target}'."
+                        );
                     }
-                    let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
-                    let local_dmlc = Path::new(&local_dmlc_path);
-                    if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
-                        fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
-                            .expect("Failed to copy Linux libdmlc.a to deps");
+                }
+                #[cfg(not(feature = "static_link"))]
+                {
+                    // Default: copy the committed .so for dynamic linking.
+                    let local_so_path = format!("lib/{arch_dir}/libxgboost.so");
+                    let local_so = Path::new(&local_so_path);
+                    if local_so.exists() {
+                        if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
+                            fs::copy(local_so, format!("{deps_path}/libxgboost.so"))
+                                .expect("Failed to copy Linux libxgboost.so to deps");
+                        }
+                        let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
+                        let local_dmlc = Path::new(&local_dmlc_path);
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
+                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
+                                .expect("Failed to copy Linux libdmlc.a to deps");
+                        }
+                    } else {
+                        // Fall back to downloading from the upstream GitHub release.
+                        let path = if target.contains("aarch64") {
+                            format!("{GITHUB_URL}/linux_arm64")
+                        } else {
+                            format!("{GITHUB_URL}/linux_amd64")
+                        };
+                        if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
+                            web_copy(&format!("{path}/libxgboost.so"), &format!("{deps_path}/libxgboost.so")).unwrap();
+                            web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
+                        }
                     }
-                } else {
-                    panic!(
-                        "No prebuilt libxgboost.a found at lib/{arch_dir}/libxgboost.a. \
-                         Build it with `xgboost-sys/scripts/build-linux-static.sh` and \
-                         commit the result, or set $XGBOOST_LIB_DIR to a directory \
-                         containing a libxgboost.a built for target '{target}'."
-                    );
                 }
             } else if target.contains("windows") {
                 let path = format!("{GITHUB_URL}/win_amd64");
@@ -238,10 +272,9 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=gomp");
     }
 
-    // Android and Linux always link statically so no .so needs to be present at
-    // runtime on-device or in the installed package (e.g. cargo-deb bundles).
-    // The `static_link` feature extends this behaviour to macOS and Windows.
-    if target.contains("android") || target.contains("linux") || cfg!(feature = "static_link") {
+    // Android is always static (no .so prebuilt exists for Android).
+    // Linux and other platforms respect the `static_link` feature flag.
+    if target.contains("android") || cfg!(feature = "static_link") {
         println!("cargo:rustc-link-lib=static=xgboost");
         println!("cargo:rustc-link-lib=static=dmlc");
     } else {

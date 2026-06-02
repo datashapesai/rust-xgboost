@@ -20,7 +20,8 @@ tempfile = "3.15"
 indexmap = "2.7"
 
 [features]
+default  = ["use_prebuilt_xgb"]
 use_prebuilt_xgb = ["xgboost-sys/use_prebuilt_xgb"]
 local_build = ["xgboost-sys/local_build"]
+static_link = ["xgboost-sys/static_link"]
 cuda = ["xgboost-sys/cuda"]
-default  = ["use_prebuilt_xgb"]
