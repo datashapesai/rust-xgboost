@@ -27,4 +27,8 @@ cmake = { version = "0.1", optional = true }
 default = ["use_prebuilt_xgb"]
 use_prebuilt_xgb = ["reqwest"]
 local_build = ["cmake"]
+# Link libxgboost statically. Implied for android and linux targets regardless
+# of this flag. When combined with `local_build`, also sets BUILD_STATIC_LIB=ON
+# in the CMake invocation so the static archive is actually produced.
+static_link = []
 cuda = []
