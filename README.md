@@ -5,22 +5,116 @@
 
 # rust-xgboost
 
-
-This is mostly a fork of https://github.com/davechallis/rust-xgboost but uses 
-another xgboost version and links it dynamically instead of linking it statically as in the original library.
-
 Rust bindings for the [XGBoost](https://xgboost.ai) gradient boosting library.
 
-Creates a shared library and uses Ninja instead of makefiles as generator.
+This is a fork of <https://github.com/davechallis/rust-xgboost> updated to XGBoost 3.0
+and extended with prebuilt library support across multiple platforms.
 
 ## Requirements
 
-It is highly recommended to use the `use_prebuilt_xgb` feature, which is enabled by default.
-It will use an already compiled xgboost library which will be downloaded as build step of this crate.
-On Mac, it will use an arm64 shared library. On windows and linux, it is using x64 architecture.
+The `use_prebuilt_xgb` feature (enabled by default) uses committed static or dynamic archives
+from `xgboost-sys/lib/<platform>/` — no internet download, no CMake required at build time.
 
-On mac you need to install `libomp` (`brew install libomp`). 
-On debian, you need `libclang-dev` (`apt install -y libclang-dev`)
+| Platform | Library type | Notes |
+|---|---|---|
+| Linux x86\_64 | static `.a` | Fully self-contained binary; no runtime `.so` needed |
+| Linux arm64 | static `.a` | Fully self-contained binary; no runtime `.so` needed |
+| macOS arm64 | dynamic `.dylib` | Requires `brew install libomp` |
+| Windows x86\_64 | dynamic `.dll` | Must be present at runtime |
+| Android arm64-v8a | static `.a` | API level 26+; see [Android](#android-arm64-v8a) section |
+
+Additional system dependency: `libclang-dev` is required by `bindgen` at build time:
+
+```bash
+# Debian / Ubuntu
+apt install -y libclang-dev
+
+# macOS
+brew install llvm
+```
+
+## Use prebuilt XGBoost library or build it
+
+XGBoost is complex to compile, especially with GPU support. The `use_prebuilt_xgb` feature
+(default) uses archives committed to this repository under `xgboost-sys/lib/`.
+Set `$XGBOOST_LIB_DIR` to point at a custom directory if you need a different build.
+
+If you prefer to use XGBoost from Homebrew (which may include GPU support):
+```bash
+export XGBOOST_LIB_DIR=${HOMEBREW_PREFIX}/opt/xgboost/lib
+```
+
+To build XGBoost from source at compile time, disable the default feature and enable
+`local_build`:
+```toml
+xgb = { version = "3", default-features = false, features = ["local_build"] }
+```
+This requires `cmake` and `ninja-build`.  After cloning, initialize the submodule first:
+```bash
+git submodule update --init --recursive
+```
+
+macOS local build dependencies:
+```bash
+brew install libomp cmake ninja llvm
+```
+
+### Feature flags
+
+| Feature | Default | Description |
+|---|---|---|
+| `use_prebuilt_xgb` | ✅ | Use committed prebuilt archives; copies them to the Cargo `deps/` dir at build time |
+| `local_build` | ❌ | Build XGBoost from source via CMake/Ninja at compile time |
+| `static_link` | ❌ | Force static linking on all platforms (implied on Linux and Android). When combined with `local_build`, sets `BUILD_STATIC_LIB=ON` in CMake. |
+| `cuda` | ❌ | Enable CUDA/GPU support (requires a local CUDA toolkit) |
+
+### Supported platforms
+
+| Platform | `use_prebuilt_xgb` | `local_build` |
+|---|---|---|
+| macOS (arm64) | ✅ | ✅ |
+| Linux x86\_64 | ✅ | ✅ |
+| Linux arm64 | ✅ | ✅ |
+| Windows x86\_64 | ✅ | ⚠️ manual steps required |
+| Android arm64-v8a | ✅ | ✅ (via `cargo-ndk`) |
+
+## Linux — static linking
+
+On Linux, `use_prebuilt_xgb` links **statically** by default: `libxgboost.a` and `libdmlc.a`
+are copied from `xgboost-sys/lib/linux_{amd64,arm64}/` into the Cargo `deps/` directory at
+build time.  The resulting binary has no runtime dependency on `libxgboost.so`, which makes it
+suitable for packaging with `cargo-deb` and similar tools without bundling a separate `.so`.
+
+`libgomp` (OpenMP) is still linked dynamically.  On Debian/Ubuntu it is provided by the
+`libgomp1` package, which is present by default.
+
+#### Rebuilding the prebuilt Linux archives
+
+The prebuilt archives were built with `cmake -DBUILD_STATIC_LIB=ON -DUSE_OPENMP=ON
+-DCMAKE_BUILD_TYPE=Release` inside a Debian 12 container and then stripped with
+`llvm-strip --strip-debug`.  To rebuild them (e.g. after updating the XGBoost submodule):
+
+```bash
+# Requires Docker with buildx support.  Run from the repository root.
+xgboost-sys/scripts/build-linux-static.sh
+```
+
+This produces stripped `libxgboost.a` and `libdmlc.a` for both `linux_amd64` and
+`linux_arm64`, copies them into `xgboost-sys/lib/`, and restores the submodule to a clean
+state.  Commit the resulting files.
+
+Alternatively, if you have a Linux environment with a Rust toolchain, CMake, Ninja, and
+`libclang-dev` available, you can use Cargo directly:
+
+```bash
+cargo build \
+  --manifest-path xgboost-sys/Cargo.toml \
+  --no-default-features \
+  --features local_build,static_link
+```
+
+The `static_link` feature sets `BUILD_STATIC_LIB=ON` in the CMake invocation and ensures the
+final link uses `cargo:rustc-link-lib=static=xgboost`.
 
 ## Documentation
 
@@ -104,46 +198,6 @@ or new features are supported. This is still expected to be compatible to an ear
 
 Builds against XGBoost 3.0.0.
 
-## Use prebuilt xgboost library or build it
-
-Xgboost is kind of complicated to compile, especially when there is GPU support involved.
-It is sometimes easier to use a pre-build library. Therefore, the feature flag `use_prebuilt_xgb` is enabled by default.
-This is using a prebuilt shared library in xboost-sys/lib by default. You can also use a custom folder by defining `$XGBOOST_LIB_DIR`.
-
-If you prefer to use xgboost from homebrew, which may have GPU support, your can for example define
-```
-XGBOOST_LIB_DIR=${HOMEBREW_PREFIX}/opt/xgboost/lib
-```
-
-If you want to use it by yourself, you can disable the use_prebuild_xgb feature:
-```
-xgb = { version = "3",  default-features = false, features=["local_build"] }
-```
-This would require `cmake` and `ninja-build` as build dependencies.
-
-If you want build it locally, after cloning, perform `git submodule update --init --recursive`
-to install submodule dependencies.
-
-brew commands for MacOs to compile locally:
-- brew install libomp
-- brew install cmake
-- brew install ninja
-- brew install llvm
-
-### Supported Platforms
-
-Prebuilt lib and built locally:
-
-* Mac OS
-* Linux
-
-Prebuilt lib only
-
-* Windows
-* Android (arm64-v8a)
-
-Local windows built is possible, but steps may require manual copy of VS output files.
-
 ## Android (arm64-v8a)
 
 A prebuilt static `libxgboost.a` (API level 26+, OpenMP disabled) is bundled in
@@ -153,30 +207,29 @@ up automatically when building for `aarch64-linux-android`.
 ### Prerequisites
 
 1. Install [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
-   ```
+   ```bash
    cargo install cargo-ndk
    ```
 2. Install the Android target:
-   ```
+   ```bash
    rustup target add aarch64-linux-android
    ```
 3. Install the Android NDK (e.g. via Android Studio SDK Manager or `sdkmanager`).
 4. Set `ANDROID_NDK_HOME` to the NDK root, e.g.:
-   ```
+   ```bash
    export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/<version>
    ```
 
 ### Running tests
 
-Unit and integration tests run on a connected device or emulator. The test data must be pushed
-to the device first:
+Unit and integration tests run on a connected device or emulator. Push the test data first:
 
 ```bash
 adb push xgboost-sys/xgboost/demo/data /data/local/tmp/xgboost-sys/xgboost/demo/data
 ```
 
-Then run the tests. Because `cargo-ndk-runner` pushes every doctest binary to the same device
-path, doctests must be run single-threaded to avoid collisions:
+Because `cargo-ndk-runner` pushes every doctest binary to the same device path, doctests must
+be run single-threaded to avoid collisions:
 
 ```bash
 # Unit / integration tests (parallel is fine)
@@ -186,16 +239,19 @@ cargo ndk -t arm64-v8a -P 26 test --lib
 cargo ndk -t arm64-v8a -P 26 test --doc -- --test-threads=1
 ```
 
-GPU support on windows:
+## Windows — GPU support
 
-How to get a .lib and .dll from pip , using a VS Developer CMD prompt:
-```
+To obtain a `.lib` and `.dll` from pip using a VS Developer Command Prompt:
+
+```bat
 python3 -m venv .venv
 .venv\Scripts\activate.bat
 pip install xgboost
 pip show xgboost
-# check Location entry
+:: check the Location entry
 copy {Location}\xgboost.dll .
 gendef xgboost.dll
-lib /def:xgboost.def /machine:x64" /out:xgboost.lib
+lib /def:xgboost.def /machine:x64 /out:xgboost.lib
 ```
+
+
