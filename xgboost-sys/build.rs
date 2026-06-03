@@ -1,4 +1,3 @@
-use bindgen;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,12 +5,9 @@ use std::path::{Path, PathBuf};
 const GITHUB_URL: &str = "https://github.com/marcomq/rust-xgboost/raw/refs/tags/v3.0.1/xgboost-sys/lib/";
 
 fn emit_version_env(xgb_root: &Path) {
-    let version_config = xgb_root
-        .join("include")
-        .join("xgboost")
-        .join("version_config.h");
-    let contents = fs::read_to_string(&version_config)
-        .unwrap_or_else(|_| panic!("Cannot read {}", version_config.display()));
+    let version_config = xgb_root.join("include").join("xgboost").join("version_config.h");
+    let contents =
+        fs::read_to_string(&version_config).unwrap_or_else(|_| panic!("Cannot read {}", version_config.display()));
 
     for line in contents.lines() {
         for (define, env_key) in &[
@@ -19,10 +15,7 @@ fn emit_version_env(xgb_root: &Path) {
             ("XGBOOST_VER_MINOR", "XGBOOST_VER_MINOR"),
             ("XGBOOST_VER_PATCH", "XGBOOST_VER_PATCH"),
         ] {
-            if let Some(rest) = line
-                .trim()
-                .strip_prefix(&format!("#define {define}"))
-            {
+            if let Some(rest) = line.trim().strip_prefix(&format!("#define {define}")) {
                 let value = rest
                     .split_whitespace()
                     .next()
@@ -97,25 +90,15 @@ fn main() {
                                 .expect("Failed to copy Android arm64 libxgboost.a to deps");
                         }
                         let local_dmlc = Path::new("lib/android_arm64/libdmlc.a");
-                        if local_dmlc.exists()
-                            && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap()
-                        {
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
                             fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
                                 .expect("Failed to copy Android arm64 libdmlc.a to deps");
                         }
                     } else if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
                         // Attempt to download from GitHub once a release asset is available there.
                         let path = format!("{GITHUB_URL}/android_arm64");
-                        web_copy(
-                            &format!("{path}/libxgboost.a"),
-                            &format!("{deps_path}/libxgboost.a"),
-                        )
-                        .unwrap();
-                        web_copy(
-                            &format!("{path}/libdmlc.a"),
-                            &format!("{deps_path}/libdmlc.a"),
-                        )
-                        .unwrap();
+                        web_copy(&format!("{path}/libxgboost.a"), &format!("{deps_path}/libxgboost.a")).unwrap();
+                        web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
                     }
                 } else {
                     panic!(
@@ -126,14 +109,62 @@ fn main() {
                     );
                 }
             } else if target.contains("linux") {
-                let path = if target.contains("aarch64") {
-                    format!("{GITHUB_URL}/linux_arm64")
-                } else {
-                    format!("{GITHUB_URL}/linux_amd64")
-                };
-                if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
-                    web_copy(&format!("{path}/libxgboost.so"), &format!("{deps_path}/libxgboost.so")).unwrap();
-                    web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
+                let arch_dir = if target.contains("aarch64") { "linux_arm64" } else { "linux_amd64" };
+
+                #[cfg(feature = "static_link")]
+                {
+                    // static_link: copy the committed .a archive so the linker
+                    // can produce a fully self-contained binary (e.g. cargo-deb).
+                    let local_lib_path = format!("lib/{arch_dir}/libxgboost.a");
+                    let local_lib = Path::new(&local_lib_path);
+                    if local_lib.exists() {
+                        if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
+                            fs::copy(local_lib, format!("{deps_path}/libxgboost.a"))
+                                .expect("Failed to copy Linux libxgboost.a to deps");
+                        }
+                        let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
+                        let local_dmlc = Path::new(&local_dmlc_path);
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
+                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
+                                .expect("Failed to copy Linux libdmlc.a to deps");
+                        }
+                    } else {
+                        panic!(
+                            "No prebuilt libxgboost.a found at lib/{arch_dir}/libxgboost.a. \
+                             Build it with `xgboost-sys/scripts/build-linux-static.sh` and \
+                             commit the result, or set $XGBOOST_LIB_DIR to a directory \
+                             containing a libxgboost.a built for target '{target}'."
+                        );
+                    }
+                }
+                #[cfg(not(feature = "static_link"))]
+                {
+                    // Default: copy the committed .so for dynamic linking.
+                    let local_so_path = format!("lib/{arch_dir}/libxgboost.so");
+                    let local_so = Path::new(&local_so_path);
+                    if local_so.exists() {
+                        if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
+                            fs::copy(local_so, format!("{deps_path}/libxgboost.so"))
+                                .expect("Failed to copy Linux libxgboost.so to deps");
+                        }
+                        let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
+                        let local_dmlc = Path::new(&local_dmlc_path);
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
+                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
+                                .expect("Failed to copy Linux libdmlc.a to deps");
+                        }
+                    } else {
+                        // Fall back to downloading from the upstream GitHub release.
+                        let path = if target.contains("aarch64") {
+                            format!("{GITHUB_URL}/linux_arm64")
+                        } else {
+                            format!("{GITHUB_URL}/linux_amd64")
+                        };
+                        if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
+                            web_copy(&format!("{path}/libxgboost.so"), &format!("{deps_path}/libxgboost.so")).unwrap();
+                            web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
+                        }
+                    }
                 }
             } else if target.contains("windows") {
                 let path = format!("{GITHUB_URL}/win_amd64");
@@ -186,6 +217,15 @@ fn main() {
             dst.define("USE_NCCL", "OFF");
         }
 
+        // When static_link is requested, produce a static archive instead of
+        // (or in addition to) the shared library.  This is required for the
+        // final `cargo:rustc-link-lib=static=xgboost` directive to succeed.
+        #[cfg(feature = "static_link")]
+        {
+            dst.define("BUILD_STATIC_LIB", "ON");
+            dst.define("BUILD_SHARED_LIBS", "OFF");
+        }
+
         #[cfg(feature = "cuda")]
         {
             dst.define("USE_CUDA", "ON")
@@ -214,16 +254,13 @@ fn main() {
         // the same deps/ directory that Rust already searches, then link them
         // by name.
         let sysroot_lib = ndk_sysroot_lib_dir(&target);
-        let deps_path =
-            dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
+        let deps_path = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
 
         for archive in &["libc++_static.a", "libc++abi.a"] {
             let src = sysroot_lib.join(archive);
             let dst = deps_path.join(archive);
             if src.exists() && !dst.exists() {
-                fs::copy(&src, &dst).unwrap_or_else(|e| {
-                    panic!("Failed to copy {archive} from NDK sysroot: {e}")
-                });
+                fs::copy(&src, &dst).unwrap_or_else(|e| panic!("Failed to copy {archive} from NDK sysroot: {e}"));
             }
         }
         println!("cargo:rustc-link-search=native={}", deps_path.display());
@@ -235,9 +272,9 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=gomp");
     }
 
-    // Android: link statically so libxgboost.so doesn't need to be shipped
-    // alongside the binary at runtime on-device.
-    if target.contains("android") {
+    // Android is always static (no .so prebuilt exists for Android).
+    // Linux and other platforms respect the `static_link` feature flag.
+    if target.contains("android") || cfg!(feature = "static_link") {
         println!("cargo:rustc-link-lib=static=xgboost");
         println!("cargo:rustc-link-lib=static=dmlc");
     } else {
