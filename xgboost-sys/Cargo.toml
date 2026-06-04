@@ -1,24 +1,24 @@
 [package]
 name = "xgboost_lib-sys"
-version = "3.0.8-dsai"
-authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
+version.workspace = true
+authors.workspace = true
 links = "xgboost"
 build = "build.rs"
-license = "MIT"
-repository = "https://github.com/marcomq/rust-xgboost"
+license.workspace = true
+repository.workspace = true
 description = "Native bindings to the xgboost library"
 readme = "README.md"
-edition = "2021"
-publish = ["ge"]
+edition.workspace = true
+publish.workspace = true
 
 [dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [build-dependencies]
 bindgen = { version = "0.71" }
 dunce =  { version = "1.0.5" }
 reqwest = { version = "0.12.15", features = ["blocking"], optional = true }
-cmake = { version = "0.1", optional = true } 
+cmake = { version = "0.1", optional = true }
 
 [features]
 default = ["use_prebuilt_xgb"]
