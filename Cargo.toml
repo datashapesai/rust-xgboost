@@ -1,6 +1,6 @@
 [package]
 name = "xgb"
-version = "3.0.7+dsai"
+version = "3.0.8-dsai"
 authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
 license = "MIT"
 repository = "https://github.com/marcomq/rust-xgboost"
@@ -12,7 +12,7 @@ edition = "2021"
 publish = ["ge"]
 
 [dependencies]
-xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.0.7-dsai", registry = "ge" }
+xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.0.8-dsai", registry = "ge" }
 libc = "0.2"
 derive_builder = "0.20"
 log = "0.4"

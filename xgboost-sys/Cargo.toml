@@ -1,6 +1,6 @@
 [package]
 name = "xgboost_lib-sys"
-version = "3.0.7+dsai"
+version = "3.0.8-dsai"
 authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
 links = "xgboost"
 build = "build.rs"
@@ -9,9 +9,6 @@ repository = "https://github.com/marcomq/rust-xgboost"
 description = "Native bindings to the xgboost library"
 readme = "README.md"
 edition = "2021"
-exclude = [
-    "lib/*",
-]
 publish = ["ge"]
 
 [dependencies]
