@@ -1,23 +1,43 @@
-[package]
-name = "xgb"
-version = "3.0.7+dsai"
+[workspace]
+members = [".", "xgboost-sys"]
+resolver = "2"
+
+[workspace.package]
+version = "3.0.8+dsai"
 authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
 license = "MIT"
 repository = "https://github.com/marcomq/rust-xgboost"
-homepage = "https://github.com/marcomq/rust-xgboost"
-description = "Machine learning using XGBoost"
-documentation = "https://docs.rs/xgboost_lib"
-readme = "README.md"
 edition = "2021"
 publish = ["ge"]
 
-[dependencies]
-xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.0.7-dsai", registry = "ge" }
+[workspace.dependencies]
+xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.0.8+dsai", registry = "ge" }
 libc = "0.2"
 derive_builder = "0.20"
 log = "0.4"
 tempfile = "3.15"
 indexmap = "2.7"
+
+[package]
+name = "xgb"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/marcomq/rust-xgboost"
+description = "Machine learning using XGBoost"
+documentation = "https://docs.rs/xgboost_lib"
+readme = "README.md"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+xgboost-sys.workspace = true
+libc.workspace = true
+derive_builder.workspace = true
+log.workspace = true
+tempfile.workspace = true
+indexmap.workspace = true
 
 [features]
 default  = ["use_prebuilt_xgb"]
