@@ -15,6 +15,14 @@ use xshell::{Shell, cmd};
 
 const TARGET_DIR: &str = "target/static-link-test";
 
+fn tool_available(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Run `cargo build --example smoke` with the supplied feature flags and return
 /// the path to the produced binary.
 fn build_smoke(sh: &Shell, features: &str) -> std::path::PathBuf {
@@ -45,14 +53,18 @@ fn build_smoke(sh: &Shell, features: &str) -> std::path::PathBuf {
 #[test]
 #[cfg(target_os = "windows")]
 fn static_link_windows_no_xgboost_dll() {
+    if !tool_available("cmake") || !tool_available("ninja") {
+        eprintln!("skipping static_link_windows_no_xgboost_dll: cmake and ninja must be on PATH");
+        return;
+    }
+    let Some(llvm_readobj) = find_llvm_readobj() else {
+        eprintln!("skipping static_link_windows_no_xgboost_dll: llvm-readobj not found; install LLVM (winget install LLVM.LLVM)");
+        return;
+    };
+
     let sh = Shell::new().unwrap();
 
     let binary = build_smoke(&sh, "local_build");
-
-    // Locate llvm-readobj: try PATH first, then the default LLVM install location.
-    let llvm_readobj = find_llvm_readobj().expect(
-        "llvm-readobj not found; install LLVM (winget install LLVM.LLVM) and ensure it is on PATH",
-    );
 
     let imports = cmd!(sh, "{llvm_readobj} --coff-imports {binary}")
         .read()
@@ -94,13 +106,14 @@ fn find_llvm_readobj() -> Option<std::path::PathBuf> {
 #[test]
 #[cfg(target_os = "windows")]
 fn static_link_windows_prebuilt_no_xgboost_dll() {
+    let Some(llvm_readobj) = find_llvm_readobj() else {
+        eprintln!("skipping static_link_windows_prebuilt_no_xgboost_dll: llvm-readobj not found; install LLVM (winget install LLVM.LLVM)");
+        return;
+    };
+
     let sh = Shell::new().unwrap();
 
     let binary = build_smoke(&sh, "use_prebuilt_xgb,static_link");
-
-    let llvm_readobj = find_llvm_readobj().expect(
-        "llvm-readobj not found; install LLVM (winget install LLVM.LLVM) and ensure it is on PATH",
-    );
 
     let imports = cmd!(sh, "{llvm_readobj} --coff-imports {binary}")
         .read()
@@ -120,6 +133,11 @@ fn static_link_windows_prebuilt_no_xgboost_dll() {
 #[test]
 #[cfg(target_os = "linux")]
 fn static_link_linux_no_libxgboost_so() {
+    if !tool_available("cmake") || !tool_available("ninja") {
+        eprintln!("skipping static_link_linux_no_libxgboost_so: cmake and ninja must be on PATH");
+        return;
+    }
+
     let sh = Shell::new().unwrap();
 
     let binary = build_smoke(&sh, "local_build,static_link");

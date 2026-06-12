@@ -31,6 +31,8 @@ fn emit_version_env(xgb_root: &Path) {
 fn main() {
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
+    // Compute deps/ path once; reused by both the prebuilt and Android C++ runtime sections.
+    let deps_path_buf = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
     // dunce::canonicalize strips the \\?\ extended-length prefix that
     // Path::canonicalize() produces on Windows, which confuses CMake's
     // file(GLOB_RECURSE) when it tries to find source files.
@@ -66,8 +68,7 @@ fn main() {
         if let Ok(xgboost_lib_dir) = std::env::var("XGBOOST_LIB_DIR") {
             println!("cargo:rustc-link-search=native={}", xgboost_lib_dir);
         } else {
-            let deps_path = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
-            let deps_path = deps_path.to_string_lossy();
+            let deps_path = deps_path_buf.to_string_lossy();
             println!("cargo:rustc-link-search=native={}", deps_path);
 
             if target.contains("apple") && target.contains("aarch64") {
@@ -300,16 +301,15 @@ fn main() {
         // the same deps/ directory that Rust already searches, then link them
         // by name.
         let sysroot_lib = ndk_sysroot_lib_dir(&target);
-        let deps_path = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
 
         for archive in &["libc++_static.a", "libc++abi.a"] {
             let src = sysroot_lib.join(archive);
-            let dst = deps_path.join(archive);
+            let dst = deps_path_buf.join(archive);
             if src.exists() && !dst.exists() {
                 fs::copy(&src, &dst).unwrap_or_else(|e| panic!("Failed to copy {archive} from NDK sysroot: {e}"));
             }
         }
-        println!("cargo:rustc-link-search=native={}", deps_path.display());
+        println!("cargo:rustc-link-search=native={}", deps_path_buf.display());
         println!("cargo:rustc-link-lib=static=c++_static");
         println!("cargo:rustc-link-lib=static=c++abi");
     } else if target.contains("linux") {
@@ -325,6 +325,8 @@ fn main() {
     let windows_local_build = cfg!(feature = "local_build") && target.contains("windows");
     if target.contains("android") || cfg!(feature = "static_link") || windows_local_build {
         println!("cargo:rustc-link-lib=static=xgboost");
+        // local_build already emitted static=dmlc above; skip the duplicate.
+        #[cfg(not(feature = "local_build"))]
         println!("cargo:rustc-link-lib=static=dmlc");
     } else {
         println!("cargo:rustc-link-lib=dylib=xgboost");
@@ -339,25 +341,39 @@ fn main() {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Maps a Rust target triple to the NDK sysroot library directory name.
+///
+/// The NDK sysroot for 32-bit ARM is named `arm-linux-androideabi`, but the
+/// Rust target triple is `armv7-linux-androideabi`.  All other Android triples
+/// match their NDK sysroot directory name exactly.
+fn ndk_sysroot_triple(target: &str) -> &str {
+    if target.starts_with("armv7") && target.contains("android") {
+        "arm-linux-androideabi"
+    } else {
+        target
+    }
+}
+
 /// Returns the NDK sysroot lib directory for `target`, e.g.
 /// `.../toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android`.
 ///
 /// Uses `NDK_PATH` (set by cargo-ndk) or falls back to `ANDROID_NDK_HOME` / `NDK_HOME`.
 fn ndk_sysroot_lib_dir(target: &str) -> PathBuf {
+    let sysroot_triple = ndk_sysroot_triple(target);
     // NDK_PATH = …/toolchains/llvm/prebuilt/<host>/bin  (set by cargo-ndk)
     if let Ok(ndk_path) = env::var("NDK_PATH") {
         return Path::new(&ndk_path)
             .parent()
             .unwrap()
             .join("sysroot/usr/lib")
-            .join(target);
+            .join(sysroot_triple);
     }
     // Fallback: walk the prebuilt/ directory for the first host entry.
     if let Ok(ndk_home) = env::var("ANDROID_NDK_HOME").or_else(|_| env::var("NDK_HOME")) {
         let prebuilt = Path::new(&ndk_home).join("toolchains/llvm/prebuilt");
         if let Ok(mut entries) = std::fs::read_dir(&prebuilt) {
             if let Some(Ok(entry)) = entries.next() {
-                return entry.path().join("sysroot/usr/lib").join(target);
+                return entry.path().join("sysroot/usr/lib").join(sysroot_triple);
             }
         }
     }
