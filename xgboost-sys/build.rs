@@ -31,7 +31,10 @@ fn emit_version_env(xgb_root: &Path) {
 fn main() {
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
-    let xgb_root = Path::new("xgboost").canonicalize().unwrap();
+    // dunce::canonicalize strips the \\?\ extended-length prefix that
+    // Path::canonicalize() produces on Windows, which confuses CMake's
+    // file(GLOB_RECURSE) when it tries to find source files.
+    let xgb_root = dunce::canonicalize(Path::new("xgboost")).unwrap();
 
     emit_version_env(&xgb_root);
 
@@ -217,11 +220,19 @@ fn main() {
             dst.define("USE_NCCL", "OFF");
         }
 
+        if target.contains("windows") {
+            // Build a true static lib; disable OpenMP to avoid a vcomp DLL dependency
+            // (MSVC's OpenMP runtime cannot be statically linked).
+            dst.define("BUILD_STATIC_LIB", "ON");
+            dst.define("BUILD_SHARED_LIBS", "OFF");
+            dst.define("USE_OPENMP", "OFF");
+        }
+
         // When static_link is requested, produce a static archive instead of
         // (or in addition to) the shared library.  This is required for the
         // final `cargo:rustc-link-lib=static=xgboost` directive to succeed.
         #[cfg(feature = "static_link")]
-        {
+        if !target.contains("windows") && !target.contains("android") {
             dst.define("BUILD_STATIC_LIB", "ON");
             dst.define("BUILD_SHARED_LIBS", "OFF");
         }
@@ -239,6 +250,12 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
         println!("cargo:rustc-link-search=native={}", dst.join("lib64").display());
         println!("cargo:rustc-link-lib=static=dmlc");
+
+        if target.contains("windows") {
+            // Transitive dependencies of statically-linked XGBoost/dmlc-core on Windows.
+            println!("cargo:rustc-link-lib=ws2_32");
+            println!("cargo:rustc-link-lib=Dbghelp");
+        }
     }
 
     // Link to the appropriate C++ runtime.
@@ -273,8 +290,11 @@ fn main() {
     }
 
     // Android is always static (no .so prebuilt exists for Android).
+    // Windows local_build is always static (MSVC's OpenMP runtime cannot be statically linked,
+    // so we disable OpenMP and produce a self-contained .lib).
     // Linux and other platforms respect the `static_link` feature flag.
-    if target.contains("android") || cfg!(feature = "static_link") {
+    let windows_local_build = cfg!(feature = "local_build") && target.contains("windows");
+    if target.contains("android") || cfg!(feature = "static_link") || windows_local_build {
         println!("cargo:rustc-link-lib=static=xgboost");
         println!("cargo:rustc-link-lib=static=dmlc");
     } else {

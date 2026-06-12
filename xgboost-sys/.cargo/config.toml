@@ -1,2 +1,2 @@
-[build]
+[target.'cfg(not(target_os = "windows"))']
 rustflags = ["-C", "link-args=-fopenmp"]
