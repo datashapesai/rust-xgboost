@@ -170,10 +170,39 @@ fn main() {
                     }
                 }
             } else if target.contains("windows") {
-                let path = format!("{GITHUB_URL}/win_amd64");
-                if !std::fs::exists(format!("{deps_path}/xgboost.dll")).unwrap() {
-                    web_copy(&format!("{path}/xgboost.dll"), &format!("{deps_path}/xgboost.dll")).unwrap();
-                    web_copy(&format!("{path}/xgboost.lib"), &format!("{deps_path}/xgboost.lib")).unwrap();
+                #[cfg(feature = "static_link")]
+                {
+                    // static_link: copy the committed .lib archives so the linker
+                    // can produce a fully self-contained binary (no xgboost.dll at runtime).
+                    // xgboost.lib is the same filename for both the DLL import lib and the
+                    // static archive; always overwrite so we link against the right one.
+                    let local_lib = Path::new("lib/win_amd64/xgboost.lib");
+                    if local_lib.exists() {
+                        fs::copy(local_lib, format!("{deps_path}/xgboost.lib"))
+                            .expect("Failed to copy Windows xgboost.lib to deps");
+                        let local_dmlc = Path::new("lib/win_amd64/dmlc.lib");
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/dmlc.lib")).unwrap() {
+                            fs::copy(local_dmlc, format!("{deps_path}/dmlc.lib"))
+                                .expect("Failed to copy Windows dmlc.lib to deps");
+                        }
+                    } else {
+                        panic!(
+                            "No prebuilt xgboost.lib found at lib/win_amd64/xgboost.lib. \
+                             Rebuild it with CMake (BUILD_STATIC_LIB=ON, USE_OPENMP=OFF) or \
+                             set $XGBOOST_LIB_DIR to a directory containing xgboost.lib and dmlc.lib."
+                        );
+                    }
+                    // Transitive dependencies of statically-linked XGBoost/dmlc-core on Windows.
+                    println!("cargo:rustc-link-lib=ws2_32");
+                    println!("cargo:rustc-link-lib=Dbghelp");
+                }
+                #[cfg(not(feature = "static_link"))]
+                {
+                    let path = format!("{GITHUB_URL}/win_amd64");
+                    if !std::fs::exists(format!("{deps_path}/xgboost.dll")).unwrap() {
+                        web_copy(&format!("{path}/xgboost.dll"), &format!("{deps_path}/xgboost.dll")).unwrap();
+                        web_copy(&format!("{path}/xgboost.lib"), &format!("{deps_path}/xgboost.lib")).unwrap();
+                    }
                 }
             } else if let Ok(homebrew_path) = std::env::var("HOMEBREW_PREFIX") {
                 let xgboost_lib_dir = format!("{}/opt/xgboost/lib", &homebrew_path);

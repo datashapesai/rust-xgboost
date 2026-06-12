@@ -88,6 +88,30 @@ fn find_llvm_readobj() -> Option<std::path::PathBuf> {
     None
 }
 
+/// On Windows with `use_prebuilt_xgb` + `static_link`, the committed
+/// `lib/win_amd64/xgboost.lib` and `dmlc.lib` are copied to deps and linked
+/// statically — no CMake required.  The smoke binary must not import `xgboost.dll`.
+#[test]
+#[cfg(target_os = "windows")]
+fn static_link_windows_prebuilt_no_xgboost_dll() {
+    let sh = Shell::new().unwrap();
+
+    let binary = build_smoke(&sh, "use_prebuilt_xgb,static_link");
+
+    let llvm_readobj = find_llvm_readobj().expect(
+        "llvm-readobj not found; install LLVM (winget install LLVM.LLVM) and ensure it is on PATH",
+    );
+
+    let imports = cmd!(sh, "{llvm_readobj} --coff-imports {binary}")
+        .read()
+        .expect("llvm-readobj failed");
+
+    assert!(
+        !imports.to_ascii_lowercase().contains("xgboost.dll"),
+        "binary has a dynamic dependency on xgboost.dll — static link failed:\n{imports}"
+    );
+}
+
 // ── Linux ──────────────────────────────────────────────────────────────────
 
 /// On Linux with `local_build` + `static_link`, xgboost is compiled as a
