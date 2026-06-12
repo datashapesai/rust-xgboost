@@ -11,10 +11,14 @@
 ///   Windows – cmake, ninja, MSVC (cl.exe), and llvm-readobj on PATH
 ///             (llvm-readobj ships with LLVM; cmake/ninja via winget or VS installer)
 ///   Linux   – cmake, ninja, a C++ compiler, and libclang-dev
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use xshell::{Shell, cmd};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const TARGET_DIR: &str = "target/static-link-test";
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn tool_available(name: &str) -> bool {
     std::process::Command::new(name)
         .arg("--version")
@@ -25,6 +29,7 @@ fn tool_available(name: &str) -> bool {
 
 /// Run `cargo build --example smoke` with the supplied feature flags and return
 /// the path to the produced binary.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn build_smoke(sh: &Shell, features: &str) -> std::path::PathBuf {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
