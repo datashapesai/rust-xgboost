@@ -31,7 +31,12 @@ fn emit_version_env(xgb_root: &Path) {
 fn main() {
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
-    let xgb_root = Path::new("xgboost").canonicalize().unwrap();
+    // Compute deps/ path once; reused by both the prebuilt and Android C++ runtime sections.
+    let deps_path_buf = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
+    // dunce::canonicalize strips the \\?\ extended-length prefix that
+    // Path::canonicalize() produces on Windows, which confuses CMake's
+    // file(GLOB_RECURSE) when it tries to find source files.
+    let xgb_root = dunce::canonicalize(Path::new("xgboost")).unwrap();
 
     emit_version_env(&xgb_root);
 
@@ -63,8 +68,7 @@ fn main() {
         if let Ok(xgboost_lib_dir) = std::env::var("XGBOOST_LIB_DIR") {
             println!("cargo:rustc-link-search=native={}", xgboost_lib_dir);
         } else {
-            let deps_path = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
-            let deps_path = deps_path.to_string_lossy();
+            let deps_path = deps_path_buf.to_string_lossy();
             println!("cargo:rustc-link-search=native={}", deps_path);
 
             if target.contains("apple") && target.contains("aarch64") {
@@ -167,10 +171,39 @@ fn main() {
                     }
                 }
             } else if target.contains("windows") {
-                let path = format!("{GITHUB_URL}/win_amd64");
-                if !std::fs::exists(format!("{deps_path}/xgboost.dll")).unwrap() {
-                    web_copy(&format!("{path}/xgboost.dll"), &format!("{deps_path}/xgboost.dll")).unwrap();
-                    web_copy(&format!("{path}/xgboost.lib"), &format!("{deps_path}/xgboost.lib")).unwrap();
+                #[cfg(feature = "static_link")]
+                {
+                    // static_link: copy the committed .lib archives so the linker
+                    // can produce a fully self-contained binary (no xgboost.dll at runtime).
+                    // xgboost.lib is the same filename for both the DLL import lib and the
+                    // static archive; always overwrite so we link against the right one.
+                    let local_lib = Path::new("lib/win_amd64/xgboost.lib");
+                    if local_lib.exists() {
+                        fs::copy(local_lib, format!("{deps_path}/xgboost.lib"))
+                            .expect("Failed to copy Windows xgboost.lib to deps");
+                        let local_dmlc = Path::new("lib/win_amd64/dmlc.lib");
+                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/dmlc.lib")).unwrap() {
+                            fs::copy(local_dmlc, format!("{deps_path}/dmlc.lib"))
+                                .expect("Failed to copy Windows dmlc.lib to deps");
+                        }
+                    } else {
+                        panic!(
+                            "No prebuilt xgboost.lib found at lib/win_amd64/xgboost.lib. \
+                             Rebuild it with CMake (BUILD_STATIC_LIB=ON, USE_OPENMP=OFF) or \
+                             set $XGBOOST_LIB_DIR to a directory containing xgboost.lib and dmlc.lib."
+                        );
+                    }
+                    // Transitive dependencies of statically-linked XGBoost/dmlc-core on Windows.
+                    println!("cargo:rustc-link-lib=ws2_32");
+                    println!("cargo:rustc-link-lib=Dbghelp");
+                }
+                #[cfg(not(feature = "static_link"))]
+                {
+                    let path = format!("{GITHUB_URL}/win_amd64");
+                    if !std::fs::exists(format!("{deps_path}/xgboost.dll")).unwrap() {
+                        web_copy(&format!("{path}/xgboost.dll"), &format!("{deps_path}/xgboost.dll")).unwrap();
+                        web_copy(&format!("{path}/xgboost.lib"), &format!("{deps_path}/xgboost.lib")).unwrap();
+                    }
                 }
             } else if let Ok(homebrew_path) = std::env::var("HOMEBREW_PREFIX") {
                 let xgboost_lib_dir = format!("{}/opt/xgboost/lib", &homebrew_path);
@@ -217,11 +250,19 @@ fn main() {
             dst.define("USE_NCCL", "OFF");
         }
 
+        if target.contains("windows") {
+            // Build a true static lib; disable OpenMP to avoid a vcomp DLL dependency
+            // (MSVC's OpenMP runtime cannot be statically linked).
+            dst.define("BUILD_STATIC_LIB", "ON");
+            dst.define("BUILD_SHARED_LIBS", "OFF");
+            dst.define("USE_OPENMP", "OFF");
+        }
+
         // When static_link is requested, produce a static archive instead of
         // (or in addition to) the shared library.  This is required for the
         // final `cargo:rustc-link-lib=static=xgboost` directive to succeed.
         #[cfg(feature = "static_link")]
-        {
+        if !target.contains("windows") && !target.contains("android") {
             dst.define("BUILD_STATIC_LIB", "ON");
             dst.define("BUILD_SHARED_LIBS", "OFF");
         }
@@ -239,6 +280,12 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
         println!("cargo:rustc-link-search=native={}", dst.join("lib64").display());
         println!("cargo:rustc-link-lib=static=dmlc");
+
+        if target.contains("windows") {
+            // Transitive dependencies of statically-linked XGBoost/dmlc-core on Windows.
+            println!("cargo:rustc-link-lib=ws2_32");
+            println!("cargo:rustc-link-lib=Dbghelp");
+        }
     }
 
     // Link to the appropriate C++ runtime.
@@ -254,16 +301,15 @@ fn main() {
         // the same deps/ directory that Rust already searches, then link them
         // by name.
         let sysroot_lib = ndk_sysroot_lib_dir(&target);
-        let deps_path = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
 
         for archive in &["libc++_static.a", "libc++abi.a"] {
             let src = sysroot_lib.join(archive);
-            let dst = deps_path.join(archive);
+            let dst = deps_path_buf.join(archive);
             if src.exists() && !dst.exists() {
                 fs::copy(&src, &dst).unwrap_or_else(|e| panic!("Failed to copy {archive} from NDK sysroot: {e}"));
             }
         }
-        println!("cargo:rustc-link-search=native={}", deps_path.display());
+        println!("cargo:rustc-link-search=native={}", deps_path_buf.display());
         println!("cargo:rustc-link-lib=static=c++_static");
         println!("cargo:rustc-link-lib=static=c++abi");
     } else if target.contains("linux") {
@@ -273,9 +319,14 @@ fn main() {
     }
 
     // Android is always static (no .so prebuilt exists for Android).
+    // Windows local_build is always static (MSVC's OpenMP runtime cannot be statically linked,
+    // so we disable OpenMP and produce a self-contained .lib).
     // Linux and other platforms respect the `static_link` feature flag.
-    if target.contains("android") || cfg!(feature = "static_link") {
+    let windows_local_build = cfg!(feature = "local_build") && target.contains("windows");
+    if target.contains("android") || cfg!(feature = "static_link") || windows_local_build {
         println!("cargo:rustc-link-lib=static=xgboost");
+        // local_build already emitted static=dmlc above; skip the duplicate.
+        #[cfg(not(feature = "local_build"))]
         println!("cargo:rustc-link-lib=static=dmlc");
     } else {
         println!("cargo:rustc-link-lib=dylib=xgboost");
@@ -290,25 +341,39 @@ fn main() {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Maps a Rust target triple to the NDK sysroot library directory name.
+///
+/// The NDK sysroot for 32-bit ARM is named `arm-linux-androideabi`, but the
+/// Rust target triple is `armv7-linux-androideabi`.  All other Android triples
+/// match their NDK sysroot directory name exactly.
+fn ndk_sysroot_triple(target: &str) -> &str {
+    if target.starts_with("armv7") && target.contains("android") {
+        "arm-linux-androideabi"
+    } else {
+        target
+    }
+}
+
 /// Returns the NDK sysroot lib directory for `target`, e.g.
 /// `.../toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android`.
 ///
 /// Uses `NDK_PATH` (set by cargo-ndk) or falls back to `ANDROID_NDK_HOME` / `NDK_HOME`.
 fn ndk_sysroot_lib_dir(target: &str) -> PathBuf {
+    let sysroot_triple = ndk_sysroot_triple(target);
     // NDK_PATH = …/toolchains/llvm/prebuilt/<host>/bin  (set by cargo-ndk)
     if let Ok(ndk_path) = env::var("NDK_PATH") {
         return Path::new(&ndk_path)
             .parent()
             .unwrap()
             .join("sysroot/usr/lib")
-            .join(target);
+            .join(sysroot_triple);
     }
     // Fallback: walk the prebuilt/ directory for the first host entry.
     if let Ok(ndk_home) = env::var("ANDROID_NDK_HOME").or_else(|_| env::var("NDK_HOME")) {
         let prebuilt = Path::new(&ndk_home).join("toolchains/llvm/prebuilt");
         if let Ok(mut entries) = std::fs::read_dir(&prebuilt) {
             if let Some(Ok(entry)) = entries.next() {
-                return entry.path().join("sysroot/usr/lib").join(target);
+                return entry.path().join("sysroot/usr/lib").join(sysroot_triple);
             }
         }
     }
