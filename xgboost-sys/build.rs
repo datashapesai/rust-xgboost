@@ -115,8 +115,14 @@ fn main() {
         dst.define("ANDROID_PLATFORM", "android-26");
         // OpenMP is not available from the NDK.
         dst.define("USE_OPENMP", "OFF");
+    } else if target.contains("apple") {
+        // macOS: XGBoost's patch_openmp_path_macos() adds a POST_BUILD step that
+        // runs install_name_tool on libxgboost.dylib, but static builds only produce
+        // libxgboost.a, so the command fails. Disabling OpenMP avoids that code path
+        // without modifying the upstream submodule.
+        dst.define("USE_OPENMP", "OFF");
     } else {
-        // Linux and macOS: OpenMP is available from the system / Homebrew.
+        // Linux: OpenMP is available from the system.
         dst.define("USE_OPENMP", "ON");
     }
 
@@ -133,13 +139,7 @@ fn main() {
     // Use the TARGET triple (the cross-compilation target), not cfg!() which
     // reflects the build host.
     if target.contains("apple") {
-        // Homebrew's libomp search path (only relevant when target is macOS).
-        println!(
-            "cargo:rustc-link-search=native={}/opt/libomp/lib",
-            &env::var("HOMEBREW_PREFIX").unwrap_or("/opt/homebrew".into())
-        );
         println!("cargo:rustc-link-lib=c++");
-        println!("cargo:rustc-link-lib=dylib=omp");
     } else if target.contains("android") {
         // libc++ is linked statically so the binary is fully self-contained.
         // cargo:rustc-link-arg does NOT propagate through dependency crates, so
