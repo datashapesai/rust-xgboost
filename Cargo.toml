@@ -46,9 +46,5 @@ path = "examples/smoke.rs"
 [dev-dependencies]
 xshell = "0.2"
 
-[features]
-default  = ["use_prebuilt_xgb"]
-use_prebuilt_xgb = ["xgboost-sys/use_prebuilt_xgb"]
-local_build = ["xgboost-sys/local_build"]
-static_link = ["xgboost-sys/static_link"]
-cuda = ["xgboost-sys/cuda"]
+# XGBoost is always built from source as a static, CPU-only library (see
+# xgboost-sys/build.rs). There are no build-configuration features to select.

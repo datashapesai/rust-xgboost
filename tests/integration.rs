@@ -1,19 +1,21 @@
 /// Static-link integration tests.
 ///
-/// Each test builds the `smoke` example with static-linking features enabled,
-/// then inspects the resulting binary's import table to verify that xgboost
-/// is not present as a dynamic dependency.
+/// XGBoost is always built from source as a static, CPU-only library. These
+/// tests build the `smoke` example and verify that:
+///   * the resulting binary has no *dynamic* dependency on xgboost, and
+///   * (Windows) the built `xgboost.lib` uses the *dynamic* MSVC CRT (/MD),
+///     matching rustc — a /MT mismatch is what caused the historical
+///     access-violation (c0000005) crash.
 ///
 /// These tests compile XGBoost from source and are intentionally slow (~1-2 min).
-/// They are skipped automatically on unsupported platforms.
+/// They are skipped automatically when the required tools are unavailable.
 ///
 /// Prerequisites:
 ///   Windows – cmake, ninja, MSVC (cl.exe), and llvm-readobj on PATH
 ///             (llvm-readobj ships with LLVM; cmake/ninja via winget or VS installer)
 ///   Linux   – cmake, ninja, a C++ compiler, and libclang-dev
-
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-use xshell::{Shell, cmd};
+use xshell::{cmd, Shell};
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const TARGET_DIR: &str = "target/static-link-test";
@@ -27,10 +29,9 @@ fn tool_available(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Run `cargo build --example smoke` with the supplied feature flags and return
-/// the path to the produced binary.
+/// Build `cargo build --example smoke` and return the path to the produced binary.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn build_smoke(sh: &Shell, features: &str) -> std::path::PathBuf {
+fn build_smoke(sh: &Shell) -> std::path::PathBuf {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
     let binary = format!("{TARGET_DIR}/debug/examples/smoke{ext}");
@@ -39,22 +40,35 @@ fn build_smoke(sh: &Shell, features: &str) -> std::path::PathBuf {
         sh,
         "cargo build
             --manifest-path {manifest}/Cargo.toml
-            --no-default-features
-            --features {features}
             --example smoke
             --target-dir {TARGET_DIR}"
     )
     .run()
-    .expect("static cargo build failed");
+    .expect("cargo build failed");
 
     std::path::PathBuf::from(&binary)
 }
 
+/// Recursively search `dir` for the first file named `name`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 // ── Windows ────────────────────────────────────────────────────────────────
 
-/// On Windows with the `local_build` feature, xgboost is compiled as a static
-/// `.lib` (with OpenMP disabled to avoid the vcomp DLL).  The smoke binary must
-/// not import `xgboost.dll`.
+/// The smoke binary must not import `xgboost.dll` — XGBoost is linked statically.
 #[test]
 #[cfg(target_os = "windows")]
 fn static_link_windows_no_xgboost_dll() {
@@ -68,8 +82,7 @@ fn static_link_windows_no_xgboost_dll() {
     };
 
     let sh = Shell::new().unwrap();
-
-    let binary = build_smoke(&sh, "local_build");
+    let binary = build_smoke(&sh);
 
     let imports = cmd!(sh, "{llvm_readobj} --coff-imports {binary}")
         .read()
@@ -78,6 +91,46 @@ fn static_link_windows_no_xgboost_dll() {
     assert!(
         !imports.to_ascii_lowercase().contains("xgboost.dll"),
         "binary has a dynamic dependency on xgboost.dll — static link failed:\n{imports}"
+    );
+}
+
+/// The built `xgboost.lib` must reference the *dynamic* MSVC CRT (`MSVCRT`),
+/// not the static CRT (`LIBCMT`). rustc links the dynamic CRT, so a static-CRT
+/// XGBoost would give each side its own heap/STL state and corrupt memory at
+/// runtime (the original c0000005 crash). This is the regression test for that
+/// fix (FORCE_SHARED_CRT=ON in build.rs).
+#[test]
+#[cfg(target_os = "windows")]
+fn windows_xgboost_lib_uses_dynamic_crt() {
+    if !tool_available("cmake") || !tool_available("ninja") {
+        eprintln!("skipping windows_xgboost_lib_uses_dynamic_crt: cmake and ninja must be on PATH");
+        return;
+    }
+    let Some(llvm_readobj) = find_llvm_readobj() else {
+        eprintln!("skipping windows_xgboost_lib_uses_dynamic_crt: llvm-readobj not found; install LLVM (winget install LLVM.LLVM)");
+        return;
+    };
+
+    let sh = Shell::new().unwrap();
+    // Ensure the lib has been built.
+    let _ = build_smoke(&sh);
+
+    let target_root = std::path::Path::new(TARGET_DIR);
+    let lib =
+        find_file(target_root, "xgboost.lib").expect("could not locate built xgboost.lib under the test target dir");
+
+    let directives = cmd!(sh, "{llvm_readobj} --coff-directives {lib}")
+        .read()
+        .expect("llvm-readobj failed");
+    let directives = directives.to_ascii_lowercase();
+
+    assert!(
+        directives.contains("defaultlib:\"msvcrt\"") || directives.contains("defaultlib:msvcrt"),
+        "xgboost.lib does not reference the dynamic CRT (MSVCRT); FORCE_SHARED_CRT may be off:\n{directives}"
+    );
+    assert!(
+        !directives.contains("libcmt"),
+        "xgboost.lib references the static CRT (LIBCMT) — this is the /MT-vs-/MD mismatch that crashes at runtime:\n{directives}"
     );
 }
 
@@ -105,36 +158,10 @@ fn find_llvm_readobj() -> Option<std::path::PathBuf> {
     None
 }
 
-/// On Windows with `use_prebuilt_xgb` + `static_link`, the committed
-/// `lib/win_amd64/xgboost.lib` and `dmlc.lib` are copied to deps and linked
-/// statically — no CMake required.  The smoke binary must not import `xgboost.dll`.
-#[test]
-#[cfg(target_os = "windows")]
-fn static_link_windows_prebuilt_no_xgboost_dll() {
-    let Some(llvm_readobj) = find_llvm_readobj() else {
-        eprintln!("skipping static_link_windows_prebuilt_no_xgboost_dll: llvm-readobj not found; install LLVM (winget install LLVM.LLVM)");
-        return;
-    };
-
-    let sh = Shell::new().unwrap();
-
-    let binary = build_smoke(&sh, "use_prebuilt_xgb,static_link");
-
-    let imports = cmd!(sh, "{llvm_readobj} --coff-imports {binary}")
-        .read()
-        .expect("llvm-readobj failed");
-
-    assert!(
-        !imports.to_ascii_lowercase().contains("xgboost.dll"),
-        "binary has a dynamic dependency on xgboost.dll — static link failed:\n{imports}"
-    );
-}
-
 // ── Linux ──────────────────────────────────────────────────────────────────
 
-/// On Linux with `local_build` + `static_link`, xgboost is compiled as a
-/// static archive and linked in.  The smoke binary must not list `libxgboost`
-/// in its `ldd` output.
+/// The smoke binary must not list `libxgboost` in its `ldd` output — XGBoost is
+/// linked statically.
 #[test]
 #[cfg(target_os = "linux")]
 fn static_link_linux_no_libxgboost_so() {
@@ -144,12 +171,9 @@ fn static_link_linux_no_libxgboost_so() {
     }
 
     let sh = Shell::new().unwrap();
+    let binary = build_smoke(&sh);
 
-    let binary = build_smoke(&sh, "local_build,static_link");
-
-    let deps = cmd!(sh, "ldd {binary}")
-        .read()
-        .expect("ldd failed");
+    let deps = cmd!(sh, "ldd {binary}").read().expect("ldd failed");
 
     assert!(
         !deps.to_ascii_lowercase().contains("libxgboost"),

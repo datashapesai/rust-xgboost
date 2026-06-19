@@ -2,8 +2,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const GITHUB_URL: &str = "https://github.com/marcomq/rust-xgboost/raw/refs/tags/v3.0.1/xgboost-sys/lib/";
-
 fn emit_version_env(xgb_root: &Path) {
     let version_config = xgb_root.join("include").join("xgboost").join("version_config.h");
     let contents =
@@ -31,275 +29,117 @@ fn emit_version_env(xgb_root: &Path) {
 fn main() {
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
-    // Compute deps/ path once; reused by both the prebuilt and Android C++ runtime sections.
-    let deps_path_buf = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
     // dunce::canonicalize strips the \\?\ extended-length prefix that
     // Path::canonicalize() produces on Windows, which confuses CMake's
     // file(GLOB_RECURSE) when it tries to find source files.
-    let xgb_root = dunce::canonicalize(Path::new("xgboost")).unwrap();
+    let xgb_root = dunce::canonicalize(Path::new("xgboost")).unwrap_or_else(|_| {
+        panic!(
+            "XGBoost submodule not found at xgboost-sys/xgboost. \
+             Run: git submodule update --init --recursive"
+        )
+    });
 
     emit_version_env(&xgb_root);
 
+    // ── bindgen: generate the C API bindings ────────────────────────────────
     let wrapper_h = xgb_root.join("include").join("xgboost").join("c_api.h");
     let bindings = bindgen::Builder::default()
         .header(wrapper_h.to_string_lossy())
         .clang_arg(format!("-I{}", xgb_root.join("include").display()))
-        .clang_arg(format!("-I{}", xgb_root.join("dmlc-core").join("include").display()));
-
-    #[cfg(feature = "cuda")]
-    let bindings = bindings.clang_arg("-I/usr/local/cuda/include");
-    let bindings = bindings.generate().expect("Unable to generate bindings.");
+        .clang_arg(format!("-I{}", xgb_root.join("dmlc-core").join("include").display()))
+        .generate()
+        .expect("Unable to generate bindings.");
 
     let out_path = PathBuf::from(&out_dir);
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings.");
 
-    // Linker search path for Apple OpenMP (host check is fine here — only relevant when target is also macOS)
+    // ── Build XGBoost from source as a static, CPU-only library ─────────────
+    //
+    // This crate only supports building libxgboost from source: there is no
+    // prebuilt-binary path. A from-source build is the only way to guarantee a
+    // consistent ABI with the consuming Rust binary — in particular the MSVC
+    // C runtime on Windows (see FORCE_SHARED_CRT below).
+    let mut dst = cmake::Config::new(&xgb_root);
+    dst.generator("Ninja");
+    dst.define("CMAKE_BUILD_TYPE", "RelWithDebInfo");
+    // Always a static, self-contained archive — no xgboost.dll/.so at runtime.
+    dst.define("BUILD_STATIC_LIB", "ON");
+    dst.define("BUILD_SHARED_LIBS", "OFF");
+    // CPU-only: no CUDA/NCCL. Keeping these OFF on every translation unit also
+    // avoids the HostDeviceVector CPU-vs-GPU ABI split.
+    dst.define("USE_CUDA", "OFF");
+    dst.define("USE_NCCL", "OFF");
+
+    if target.contains("windows") {
+        // CRITICAL: rustc's *-pc-windows-msvc target links the *dynamic* CRT
+        // (/MD -> MSVCRT/ucrtbase). XGBoost's CMake defaults to the *static*
+        // CRT (/MT -> LIBCMT) when BUILD_STATIC_LIB is on. Mixing the two gives
+        // each side its own heap and its own copy of the C++ STL state, which
+        // corrupts std::shared_ptr control blocks at runtime (access violation
+        // c0000005). FORCE_SHARED_CRT=ON makes XGBoost (and dmlc) build /MD to
+        // match rustc.
+        dst.define("FORCE_SHARED_CRT", "ON");
+        // MSVC's OpenMP runtime (vcomp140.dll) cannot be linked statically, so
+        // building a self-contained .lib requires OpenMP off. XGBoost then runs
+        // single-threaded on Windows.
+        dst.define("USE_OPENMP", "OFF");
+    } else if target.contains("android") {
+        // Cross-compile using the Android NDK toolchain.
+        let ndk_home = env::var("ANDROID_NDK_HOME")
+            .or_else(|_| env::var("NDK_HOME"))
+            .expect("ANDROID_NDK_HOME or NDK_HOME must be set for Android builds");
+        let toolchain_file = format!("{}/build/cmake/android.toolchain.cmake", ndk_home);
+
+        let abi = if target.contains("aarch64") {
+            "arm64-v8a"
+        } else if target.contains("armv7") {
+            "armeabi-v7a"
+        } else if target.contains("x86_64") {
+            "x86_64"
+        } else {
+            "x86"
+        };
+
+        dst.define("CMAKE_TOOLCHAIN_FILE", &toolchain_file);
+        dst.define("ANDROID_ABI", abi);
+        // API 26 (Android 8.0+) minimum: pthread_getname_np (used by XGBoost's
+        // threading_utils.cc) was introduced there.
+        dst.define("ANDROID_PLATFORM", "android-26");
+        // OpenMP is not available from the NDK.
+        dst.define("USE_OPENMP", "OFF");
+    } else {
+        // Linux and macOS: OpenMP is available from the system / Homebrew.
+        dst.define("USE_OPENMP", "ON");
+    }
+
+    let dst = dst.build();
+
+    println!("cargo:rustc-link-search=native={}", dst.display());
+    println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
+    println!("cargo:rustc-link-search=native={}", dst.join("lib64").display());
+
+    println!("cargo:rustc-link-lib=static=xgboost");
+    println!("cargo:rustc-link-lib=static=dmlc");
+
+    // ── Link the C++ runtime, OpenMP, and platform libraries ────────────────
+    // Use the TARGET triple (the cross-compilation target), not cfg!() which
+    // reflects the build host.
     if target.contains("apple") {
+        // Homebrew's libomp search path (only relevant when target is macOS).
         println!(
             "cargo:rustc-link-search=native={}/opt/libomp/lib",
-            &std::env::var("HOMEBREW_PREFIX").unwrap_or("/opt/homebrew".into())
+            &env::var("HOMEBREW_PREFIX").unwrap_or("/opt/homebrew".into())
         );
-    }
-
-    #[cfg(feature = "use_prebuilt_xgb")]
-    {
-        if let Ok(xgboost_lib_dir) = std::env::var("XGBOOST_LIB_DIR") {
-            println!("cargo:rustc-link-search=native={}", xgboost_lib_dir);
-        } else {
-            let deps_path = deps_path_buf.to_string_lossy();
-            println!("cargo:rustc-link-search=native={}", deps_path);
-
-            if target.contains("apple") && target.contains("aarch64") {
-                let path = format!("{GITHUB_URL}/mac_arm64");
-                if !std::fs::exists(format!("{deps_path}/libxgboost.dylib")).unwrap() {
-                    web_copy(
-                        &format!("{path}/libxgboost.dylib"),
-                        &format!("{deps_path}/libxgboost.dylib"),
-                    )
-                    .unwrap();
-                    web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
-                }
-            } else if target.contains("android") {
-                if target.contains("aarch64") {
-                    // Prefer local prebuilt (present in the source repo under lib/android_arm64/)
-                    // when building from source. Falls back to XGBOOST_LIB_DIR (handled above)
-                    // or a future GitHub download URL.
-                    // We ship a static archive so libxgboost.so doesn't need to be on-device.
-                    let local_lib = Path::new("lib/android_arm64/libxgboost.a");
-                    if local_lib.exists() {
-                        if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
-                            fs::copy(local_lib, format!("{deps_path}/libxgboost.a"))
-                                .expect("Failed to copy Android arm64 libxgboost.a to deps");
-                        }
-                        let local_dmlc = Path::new("lib/android_arm64/libdmlc.a");
-                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
-                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
-                                .expect("Failed to copy Android arm64 libdmlc.a to deps");
-                        }
-                    } else if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
-                        // Attempt to download from GitHub once a release asset is available there.
-                        let path = format!("{GITHUB_URL}/android_arm64");
-                        web_copy(&format!("{path}/libxgboost.a"), &format!("{deps_path}/libxgboost.a")).unwrap();
-                        web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
-                    }
-                } else {
-                    panic!(
-                        "Unsupported Android target '{}'. \
-                         Please set $XGBOOST_LIB_DIR to a directory containing \
-                         libxgboost.a built for this ABI.",
-                        target
-                    );
-                }
-            } else if target.contains("linux") {
-                let arch_dir = if target.contains("aarch64") { "linux_arm64" } else { "linux_amd64" };
-
-                #[cfg(feature = "static_link")]
-                {
-                    // static_link: copy the committed .a archive so the linker
-                    // can produce a fully self-contained binary (e.g. cargo-deb).
-                    let local_lib_path = format!("lib/{arch_dir}/libxgboost.a");
-                    let local_lib = Path::new(&local_lib_path);
-                    if local_lib.exists() {
-                        if !std::fs::exists(format!("{deps_path}/libxgboost.a")).unwrap() {
-                            fs::copy(local_lib, format!("{deps_path}/libxgboost.a"))
-                                .expect("Failed to copy Linux libxgboost.a to deps");
-                        }
-                        let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
-                        let local_dmlc = Path::new(&local_dmlc_path);
-                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
-                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
-                                .expect("Failed to copy Linux libdmlc.a to deps");
-                        }
-                    } else {
-                        panic!(
-                            "No prebuilt libxgboost.a found at lib/{arch_dir}/libxgboost.a. \
-                             Build it with `xgboost-sys/scripts/build-linux-static.sh` and \
-                             commit the result, or set $XGBOOST_LIB_DIR to a directory \
-                             containing a libxgboost.a built for target '{target}'."
-                        );
-                    }
-                }
-                #[cfg(not(feature = "static_link"))]
-                {
-                    // Default: copy the committed .so for dynamic linking.
-                    let local_so_path = format!("lib/{arch_dir}/libxgboost.so");
-                    let local_so = Path::new(&local_so_path);
-                    if local_so.exists() {
-                        if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
-                            fs::copy(local_so, format!("{deps_path}/libxgboost.so"))
-                                .expect("Failed to copy Linux libxgboost.so to deps");
-                        }
-                        let local_dmlc_path = format!("lib/{arch_dir}/libdmlc.a");
-                        let local_dmlc = Path::new(&local_dmlc_path);
-                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/libdmlc.a")).unwrap() {
-                            fs::copy(local_dmlc, format!("{deps_path}/libdmlc.a"))
-                                .expect("Failed to copy Linux libdmlc.a to deps");
-                        }
-                    } else {
-                        // Fall back to downloading from the upstream GitHub release.
-                        let path = if target.contains("aarch64") {
-                            format!("{GITHUB_URL}/linux_arm64")
-                        } else {
-                            format!("{GITHUB_URL}/linux_amd64")
-                        };
-                        if !std::fs::exists(format!("{deps_path}/libxgboost.so")).unwrap() {
-                            web_copy(&format!("{path}/libxgboost.so"), &format!("{deps_path}/libxgboost.so")).unwrap();
-                            web_copy(&format!("{path}/libdmlc.a"), &format!("{deps_path}/libdmlc.a")).unwrap();
-                        }
-                    }
-                }
-            } else if target.contains("windows") {
-                #[cfg(feature = "static_link")]
-                {
-                    // static_link: copy the committed .lib archives so the linker
-                    // can produce a fully self-contained binary (no xgboost.dll at runtime).
-                    // xgboost.lib is the same filename for both the DLL import lib and the
-                    // static archive; always overwrite so we link against the right one.
-                    let local_lib = Path::new("lib/win_amd64/xgboost.lib");
-                    if local_lib.exists() {
-                        fs::copy(local_lib, format!("{deps_path}/xgboost.lib"))
-                            .expect("Failed to copy Windows xgboost.lib to deps");
-                        let local_dmlc = Path::new("lib/win_amd64/dmlc.lib");
-                        if local_dmlc.exists() && !std::fs::exists(format!("{deps_path}/dmlc.lib")).unwrap() {
-                            fs::copy(local_dmlc, format!("{deps_path}/dmlc.lib"))
-                                .expect("Failed to copy Windows dmlc.lib to deps");
-                        }
-                    } else {
-                        panic!(
-                            "No prebuilt xgboost.lib found at lib/win_amd64/xgboost.lib. \
-                             Rebuild it with CMake (BUILD_STATIC_LIB=ON, USE_OPENMP=OFF) or \
-                             set $XGBOOST_LIB_DIR to a directory containing xgboost.lib and dmlc.lib."
-                        );
-                    }
-                    // Transitive dependencies of statically-linked XGBoost/dmlc-core on Windows.
-                    println!("cargo:rustc-link-lib=ws2_32");
-                    println!("cargo:rustc-link-lib=Dbghelp");
-                }
-                #[cfg(not(feature = "static_link"))]
-                {
-                    let path = format!("{GITHUB_URL}/win_amd64");
-                    if !std::fs::exists(format!("{deps_path}/xgboost.dll")).unwrap() {
-                        web_copy(&format!("{path}/xgboost.dll"), &format!("{deps_path}/xgboost.dll")).unwrap();
-                        web_copy(&format!("{path}/xgboost.lib"), &format!("{deps_path}/xgboost.lib")).unwrap();
-                    }
-                }
-            } else if let Ok(homebrew_path) = std::env::var("HOMEBREW_PREFIX") {
-                let xgboost_lib_dir = format!("{}/opt/xgboost/lib", &homebrew_path);
-                println!("cargo:rustc-link-search=native={}", xgboost_lib_dir);
-            } else {
-                panic!("Please set $XGBOOST_LIB_DIR")
-            }
-        }
-    }
-
-    #[cfg(feature = "local_build")]
-    {
-        // Compile XGBoost with CMake + Ninja.
-        let mut dst = cmake::Config::new(&xgb_root);
-        dst.generator("Ninja");
-        dst.define("CMAKE_BUILD_TYPE", "RelWithDebInfo");
-
-        if target.contains("android") {
-            // Cross-compile using the Android NDK toolchain.
-            let ndk_home = env::var("ANDROID_NDK_HOME")
-                .or_else(|_| env::var("NDK_HOME"))
-                .expect("ANDROID_NDK_HOME or NDK_HOME must be set for Android local_build");
-            let toolchain_file = format!("{}/build/cmake/android.toolchain.cmake", ndk_home);
-
-            let abi = if target.contains("aarch64") {
-                "arm64-v8a"
-            } else if target.contains("armv7") {
-                "armeabi-v7a"
-            } else if target.contains("x86_64") {
-                "x86_64"
-            } else {
-                "x86"
-            };
-
-            dst.define("CMAKE_TOOLCHAIN_FILE", &toolchain_file);
-            dst.define("ANDROID_ABI", abi);
-            // Use API 26 (Android 8.0+) as the minimum.  pthread_getname_np (used
-            // by XGBoost's threading_utils.cc) was introduced in API 26; building
-            // against an earlier API level would require patching the submodule.
-            dst.define("ANDROID_PLATFORM", "android-26");
-            // OpenMP is not available from the NDK; build without it.
-            dst.define("USE_OPENMP", "OFF");
-            dst.define("USE_CUDA", "OFF");
-            dst.define("USE_NCCL", "OFF");
-        }
-
-        if target.contains("windows") {
-            // Build a true static lib; disable OpenMP to avoid a vcomp DLL dependency
-            // (MSVC's OpenMP runtime cannot be statically linked).
-            dst.define("BUILD_STATIC_LIB", "ON");
-            dst.define("BUILD_SHARED_LIBS", "OFF");
-            dst.define("USE_OPENMP", "OFF");
-        }
-
-        // When static_link is requested, produce a static archive instead of
-        // (or in addition to) the shared library.  This is required for the
-        // final `cargo:rustc-link-lib=static=xgboost` directive to succeed.
-        #[cfg(feature = "static_link")]
-        if !target.contains("windows") && !target.contains("android") {
-            dst.define("BUILD_STATIC_LIB", "ON");
-            dst.define("BUILD_SHARED_LIBS", "OFF");
-        }
-
-        #[cfg(feature = "cuda")]
-        {
-            dst.define("USE_CUDA", "ON")
-                .define("BUILD_WITH_CUDA", "ON")
-                .define("BUILD_WITH_CUDA_CUB", "ON");
-        }
-
-        let dst = dst.build();
-
-        println!("cargo:rustc-link-search=native={}", dst.display());
-        println!("cargo:rustc-link-search=native={}", dst.join("lib").display());
-        println!("cargo:rustc-link-search=native={}", dst.join("lib64").display());
-        println!("cargo:rustc-link-lib=static=dmlc");
-
-        if target.contains("windows") {
-            // Transitive dependencies of statically-linked XGBoost/dmlc-core on Windows.
-            println!("cargo:rustc-link-lib=ws2_32");
-            println!("cargo:rustc-link-lib=Dbghelp");
-        }
-    }
-
-    // Link to the appropriate C++ runtime.
-    // Use TARGET env var (the cross-compilation target), not cfg!() which reflects the host.
-    if target.contains("apple") {
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=dylib=omp");
     } else if target.contains("android") {
-        // libxgboost.a and libdmlc.a are linked statically (no .so needed on
-        // device).  libc++ is also linked statically so the binary is fully
-        // self-contained.  cargo:rustc-link-arg does NOT propagate through
-        // dependency crates, so we copy the NDK's libc++ static archives into
-        // the same deps/ directory that Rust already searches, then link them
-        // by name.
+        // libc++ is linked statically so the binary is fully self-contained.
+        // cargo:rustc-link-arg does NOT propagate through dependency crates, so
+        // copy the NDK's libc++ static archives into the deps/ directory that
+        // Rust already searches, then link them by name.
+        let deps_path_buf = dunce::canonicalize(Path::new(&format!("{}/../../../deps", out_dir))).unwrap();
         let sysroot_lib = ndk_sysroot_lib_dir(&target);
 
         for archive in &["libc++_static.a", "libc++abi.a"] {
@@ -312,34 +152,17 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", deps_path_buf.display());
         println!("cargo:rustc-link-lib=static=c++_static");
         println!("cargo:rustc-link-lib=static=c++abi");
-    } else if target.contains("linux") {
+    } else if target.contains("windows") {
+        // Transitive dependencies of statically-linked XGBoost/dmlc-core.
+        println!("cargo:rustc-link-lib=ws2_32");
+        println!("cargo:rustc-link-lib=Dbghelp");
+    } else {
+        // Linux.
         println!("cargo:rustc-link-lib=stdc++");
         println!("cargo:rustc-link-lib=stdc++fs");
         println!("cargo:rustc-link-lib=dylib=gomp");
     }
-
-    // Android is always static (no .so prebuilt exists for Android).
-    // Windows local_build is always static (MSVC's OpenMP runtime cannot be statically linked,
-    // so we disable OpenMP and produce a self-contained .lib).
-    // Linux and other platforms respect the `static_link` feature flag.
-    let windows_local_build = cfg!(feature = "local_build") && target.contains("windows");
-    if target.contains("android") || cfg!(feature = "static_link") || windows_local_build {
-        println!("cargo:rustc-link-lib=static=xgboost");
-        // local_build already emitted static=dmlc above; skip the duplicate.
-        #[cfg(not(feature = "local_build"))]
-        println!("cargo:rustc-link-lib=static=dmlc");
-    } else {
-        println!("cargo:rustc-link-lib=dylib=xgboost");
-    }
-
-    #[cfg(feature = "cuda")]
-    {
-        println!("cargo:rustc-link-search={}", "/usr/local/cuda/lib64");
-        println!("cargo:rustc-link-lib=static=cudart_static");
-    }
 }
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Maps a Rust target triple to the NDK sysroot library directory name.
 ///
@@ -381,13 +204,4 @@ fn ndk_sysroot_lib_dir(target: &str) -> PathBuf {
         "Cannot locate NDK sysroot for target '{target}'. \
          Set ANDROID_NDK_HOME or NDK_HOME, or use cargo-ndk."
     );
-}
-
-#[cfg(feature = "use_prebuilt_xgb")]
-fn web_copy(web_src: &str, target: &str) -> Result<()> {
-    dbg!(&web_src);
-    let resp = reqwest::blocking::get(web_src)?;
-    let body = resp.bytes()?;
-    std::fs::write(target, &body)?;
-    Ok(())
 }
