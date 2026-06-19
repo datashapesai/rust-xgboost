@@ -7,119 +7,48 @@
 
 Rust bindings for the [XGBoost](https://xgboost.ai) gradient boosting library.
 
-This is a fork of <https://github.com/davechallis/rust-xgboost> updated to XGBoost 3.0
-and extended with prebuilt library support across multiple platforms.
+This is a fork of <https://github.com/davechallis/rust-xgboost> updated to XGBoost 3.0.
+
+XGBoost is **always built from source** as a **static, CPU-only** library. There are no
+prebuilt-binary, dynamic-linking, or CUDA build options — this keeps the ABI consistent with
+the consuming Rust binary on every platform (the original motivation: a static-vs-dynamic CRT
+mismatch on Windows caused runtime memory corruption). The build produces a self-contained
+binary with no `xgboost.dll`/`.so`/`.dylib` dependency at runtime.
 
 ## Requirements
 
-The `use_prebuilt_xgb` feature (enabled by default) uses committed static or dynamic archives
-from `xgboost-sys/lib/<platform>/` — no internet download, no CMake required at build time.
+A from-source build needs the following at compile time on every platform:
 
-| Platform          | Library type     | Notes                                                    |
-|-------------------|------------------|----------------------------------------------------------|
-| Linux x86\_64     | static `.a`      | Fully self-contained binary; no runtime `.so` needed     |
-| Linux arm64       | static `.a`      | Fully self-contained binary; no runtime `.so` needed     |
-| macOS arm64       | dynamic `.dylib` | Requires `brew install libomp`                           |
-| Windows x86\_64   | dynamic `.dll`   | Must be present at runtime                               |
-| Android arm64-v8a | static `.a`      | API level 26+; see [Android](#android-arm64-v8a) section |
+* the XGBoost submodule — after cloning, run `git submodule update --init --recursive`
+* `cmake` and `ninja`
+* a C++ toolchain (MSVC `cl.exe` on Windows; `g++`/`clang++` elsewhere)
+* `libclang` for `bindgen`
 
-Additional system dependency: `libclang-dev` is required by `bindgen` at build time:
+Per-platform notes:
 
-```bash
-# Debian / Ubuntu
-apt install -y libclang-dev
+| Platform        | OpenMP            | Extra setup                                  |
+|-----------------|-------------------|----------------------------------------------|
+| Linux x86\_64   | system `libgomp1` | `apt install -y libclang-dev cmake ninja-build` |
+| Linux arm64     | system `libgomp1` | as above                                     |
+| macOS arm64     | Homebrew `libomp` | `brew install libomp cmake ninja llvm`       |
+| Windows x86\_64 | disabled¹         | MSVC, `cmake`, `ninja` on PATH               |
+| Android arm64   | disabled          | `cargo-ndk`; set `ANDROID_NDK_HOME`          |
 
-# macOS
-brew install llvm
-```
+¹ MSVC's OpenMP runtime (`vcomp140.dll`) cannot be linked statically, so OpenMP is disabled on
+Windows and XGBoost runs single-threaded there.
 
-## Use prebuilt XGBoost library or build it
+## Usage
 
-XGBoost is complex to compile, especially with GPU support. The `use_prebuilt_xgb` feature
-(default) uses archives committed to this repository under `xgboost-sys/lib/`.
-Set `$XGBOOST_LIB_DIR` to point at a custom directory if you need a different build.
+No build features are required — just depend on the crate and build:
 
-If you prefer to use XGBoost from Homebrew (which may include GPU support):
-```bash
-export XGBOOST_LIB_DIR=${HOMEBREW_PREFIX}/opt/xgboost/lib
-```
-
-To build XGBoost from source at compile time, disable the default feature and enable
-`local_build`:
 ```toml
-xgb = { version = "3", default-features = false, features = ["local_build"] }
+xgb = "3"
 ```
-This requires `cmake` and `ninja-build`.  After cloning, initialize the submodule first:
+
 ```bash
 git submodule update --init --recursive
+cargo build
 ```
-
-macOS local build dependencies:
-```bash
-brew install libomp cmake ninja llvm
-```
-
-### Feature flags
-
-| Feature            | Default | Description                                                                                                                                                                                                                      |
-|--------------------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `use_prebuilt_xgb` | ✅       | Use committed prebuilt archives; copies them to the Cargo `deps/` dir at build time                                                                                                                                              |
-| `local_build`      | ❌       | Build XGBoost from source via CMake/Ninja at compile time                                                                                                                                                                        |
-| `static_link`      | ❌       | Link libxgboost statically. Always implied for Android. On Linux (and macOS/Windows), enables self-contained binaries suitable for `cargo-deb` packaging. When combined with `local_build`, sets `BUILD_STATIC_LIB=ON` in CMake. |
-| `cuda`             | ❌       | Enable CUDA/GPU support (requires a local CUDA toolkit)                                                                                                                                                                          |
-
-### Supported platforms
-
-| Platform          | `use_prebuilt_xgb` | `local_build`            |
-|-------------------|--------------------|--------------------------|
-| macOS (arm64)     | ✅                  | ✅                        |
-| Linux x86\_64     | ✅                  | ✅                        |
-| Linux arm64       | ✅                  | ✅                        |
-| Windows x86\_64   | ✅                  | ⚠️ manual steps required |
-| Android arm64-v8a | ✅                  | ✅ (via `cargo-ndk`)      |
-
-## Linux — static linking
-
-On Linux, the default (`use_prebuilt_xgb` without `static_link`) links **dynamically** against
-the committed `libxgboost.so`.  Enable the `static_link` feature to link against
-`libxgboost.a` instead, producing a binary with no runtime dependency on `libxgboost.so`.
-This is the recommended approach when packaging with `cargo-deb` or deploying to systems where
-`libxgboost.so` is not installed.
-
-```toml
-xgb = { version = "3", features = ["static_link"] }
-```
-
-`libgomp` (OpenMP) is still linked dynamically in both cases.  On Debian/Ubuntu it is provided
-by the `libgomp1` package, which is present by default.
-
-#### Rebuilding the prebuilt Linux archives
-
-The prebuilt archives were built with `cmake -DBUILD_STATIC_LIB=ON -DUSE_OPENMP=ON
--DCMAKE_BUILD_TYPE=Release` inside a Debian 12 container and then stripped with
-`llvm-strip --strip-debug`.  To rebuild them (e.g. after updating the XGBoost submodule):
-
-```bash
-# Requires Docker with buildx support.  Run from the repository root.
-xgboost-sys/scripts/build-linux-static.sh
-```
-
-This produces stripped `libxgboost.a` and `libdmlc.a` for both `linux_amd64` and
-`linux_arm64`, copies them into `xgboost-sys/lib/`, and restores the submodule to a clean
-state.  Commit the resulting files.
-
-Alternatively, if you have a Linux environment with a Rust toolchain, CMake, Ninja, and
-`libclang-dev` available, you can use Cargo directly:
-
-```bash
-cargo build \
-  --manifest-path xgboost-sys/Cargo.toml \
-  --no-default-features \
-  --features local_build,static_link
-```
-
-The `static_link` feature sets `BUILD_STATIC_LIB=ON` in the CMake invocation and ensures the
-final link uses `cargo:rustc-link-lib=static=xgboost`.
 
 ## Documentation
 
@@ -205,9 +134,8 @@ Builds against XGBoost 3.0.0.
 
 ## Android (arm64-v8a)
 
-A prebuilt static `libxgboost.a` (API level 26+, OpenMP disabled) is bundled in
-`xgboost-sys/lib/android_arm64/`. The `use_prebuilt_xgb` feature (enabled by default) picks it
-up automatically when building for `aarch64-linux-android`.
+XGBoost is cross-compiled from source for `aarch64-linux-android` (API level 26+, OpenMP
+disabled) via the NDK toolchain. `libc++` is linked statically so the binary is self-contained.
 
 ### Prerequisites
 
@@ -244,19 +172,5 @@ cargo ndk -t arm64-v8a -P 26 test --lib
 cargo ndk -t arm64-v8a -P 26 test --doc -- --test-threads=1
 ```
 
-## Windows — GPU support
-
-To obtain a `.lib` and `.dll` from pip using a VS Developer Command Prompt:
-
-```bat
-python3 -m venv .venv
-.venv\Scripts\activate.bat
-pip install xgboost
-pip show xgboost
-:: check the Location entry
-copy {Location}\xgboost.dll .
-gendef xgboost.dll
-lib /def:xgboost.def /machine:x64 /out:xgboost.lib
-```
 
 
