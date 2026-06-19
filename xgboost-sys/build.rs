@@ -71,6 +71,12 @@ fn main() {
     // avoids the HostDeviceVector CPU-vs-GPU ABI split.
     dst.define("USE_CUDA", "OFF");
     dst.define("USE_NCCL", "OFF");
+    // Write the built archive into the CMake binary dir (under OUT_DIR) instead
+    // of XGBoost's default of the source tree. Without this, `cargo package`
+    // fails verification because build.rs would modify the packaged source
+    // ("Source directory was modified by build.rs"). The lib is still installed
+    // to OUT_DIR/lib, which is where we link from.
+    dst.define("KEEP_BUILD_ARTIFACTS_IN_BINARY_DIR", "ON");
 
     if target.contains("windows") {
         // CRITICAL: rustc's *-pc-windows-msvc target links the *dynamic* CRT
