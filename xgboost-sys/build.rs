@@ -93,10 +93,23 @@ fn main() {
         dst.define("USE_OPENMP", "OFF");
     } else if target.contains("android") {
         // Cross-compile using the Android NDK toolchain.
-        let ndk_home = env::var("ANDROID_NDK_HOME")
-            .or_else(|_| env::var("NDK_HOME"))
-            .expect("ANDROID_NDK_HOME or NDK_HOME must be set for Android builds");
-        let toolchain_file = format!("{}/build/cmake/android.toolchain.cmake", ndk_home);
+        //
+        // `cargo ndk` (https://github.com/bbqsrc/cargo-ndk) already resolves the NDK
+        // location for every invocation it makes and exposes the toolchain file
+        // directly via `CARGO_NDK_CMAKE_TOOLCHAIN_PATH` — prefer that so `cargo ndk`
+        // builds work with no extra environment setup. Fall back to
+        // `ANDROID_NDK_HOME`/`NDK_HOME` for callers that invoke cargo directly
+        // (e.g. `cargo build --target aarch64-linux-android`).
+        let toolchain_file = match env::var("CARGO_NDK_CMAKE_TOOLCHAIN_PATH") {
+            Ok(path) => path,
+            Err(_) => {
+                let ndk_home = env::var("ANDROID_NDK_HOME").or_else(|_| env::var("NDK_HOME")).expect(
+                    "ANDROID_NDK_HOME or NDK_HOME must be set for Android builds \
+                         (or build via `cargo ndk`, which sets CARGO_NDK_CMAKE_TOOLCHAIN_PATH)",
+                );
+                format!("{}/build/cmake/android.toolchain.cmake", ndk_home)
+            }
+        };
 
         let abi = if target.contains("aarch64") {
             "arm64-v8a"
@@ -186,10 +199,20 @@ fn ndk_sysroot_triple(target: &str) -> &str {
 /// Returns the NDK sysroot lib directory for `target`, e.g.
 /// `.../toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android`.
 ///
-/// Uses `NDK_PATH` (set by cargo-ndk) or falls back to `ANDROID_NDK_HOME` / `NDK_HOME`.
+/// `cargo ndk` sets `CARGO_NDK_SYSROOT_LIBS_PATH` to exactly this directory, so that
+/// is checked first. Otherwise falls back to `ANDROID_NDK_HOME` / `NDK_HOME` by
+/// walking the `prebuilt/` directory for the host entry.
+///
+/// Note: `NDK_PATH` is *not* set by cargo-ndk itself — it is a convention from this
+/// project's own shell environment (points at the toolchain's `bin/` dir) — but is
+/// still honored here for callers that rely on it.
 fn ndk_sysroot_lib_dir(target: &str) -> PathBuf {
     let sysroot_triple = ndk_sysroot_triple(target);
-    // NDK_PATH = …/toolchains/llvm/prebuilt/<host>/bin  (set by cargo-ndk)
+    // Set directly by cargo-ndk to the exact sysroot lib dir for the current target.
+    if let Ok(sysroot_libs) = env::var("CARGO_NDK_SYSROOT_LIBS_PATH") {
+        return PathBuf::from(sysroot_libs);
+    }
+    // …/toolchains/llvm/prebuilt/<host>/bin
     if let Ok(ndk_path) = env::var("NDK_PATH") {
         return Path::new(&ndk_path)
             .parent()
