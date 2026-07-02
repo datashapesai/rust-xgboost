@@ -3,7 +3,7 @@ members = [".", "xgboost-sys"]
 resolver = "2"
 
 [workspace.package]
-version = "3.1.0+dsai"
+version = "3.1.1+dsai"
 authors = ["Dave Challis <dave@suicas.net>", "Marco Mengelkoch"]
 license = "MIT"
 repository = "https://github.com/marcomq/rust-xgboost"
@@ -11,7 +11,7 @@ edition = "2021"
 publish = ["ge"]
 
 [workspace.dependencies]
-xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.1.0+dsai", registry = "ge" }
+xgboost-sys = { package = "xgboost_lib-sys", path = "xgboost-sys", version = "3.1.1+dsai", registry = "ge" }
 libc = "0.2"
 derive_builder = "0.20"
 log = "0.4"
