@@ -43,12 +43,24 @@ fn main() {
 
     // ── bindgen: generate the C API bindings ────────────────────────────────
     let wrapper_h = xgb_root.join("include").join("xgboost").join("c_api.h");
-    let bindings = bindgen::Builder::default()
+    let mut bindgen_builder = bindgen::Builder::default()
         .header(wrapper_h.to_string_lossy())
         .clang_arg(format!("-I{}", xgb_root.join("include").display()))
-        .clang_arg(format!("-I{}", xgb_root.join("dmlc-core").join("include").display()))
-        .generate()
-        .expect("Unable to generate bindings.");
+        .clang_arg(format!("-I{}", xgb_root.join("dmlc-core").join("include").display()));
+
+    if target.contains("android") {
+        // NDK's bionic sys/cdefs.h refuses to compile without an explicit,
+        // API-level-versioned target triple ("Unversioned target triples are
+        // not supported!"). cargo-ndk's BINDGEN_EXTRA_CLANG_ARGS_<target> only
+        // ever supplies --sysroot/-I (see cargo-ndk's src/cargo.rs), never
+        // --target, so bindgen falls back to inserting its own unversioned,
+        // Cargo-TARGET-derived one, which trips that check. Supply a versioned
+        // target ourselves instead. API 26 matches ANDROID_PLATFORM below
+        // (XGBoost's own minimum, for pthread_getname_np).
+        bindgen_builder = bindgen_builder.clang_arg(format!("--target={target}26"));
+    }
+
+    let bindings = bindgen_builder.generate().expect("Unable to generate bindings.");
 
     let out_path = PathBuf::from(&out_dir);
     bindings
