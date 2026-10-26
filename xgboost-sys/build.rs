@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn emit_version_env(xgb_root: &Path) {
     let version_config = xgb_root.join("include").join("xgboost").join("version_config.h");
@@ -40,6 +41,7 @@ fn main() {
     });
 
     emit_version_env(&xgb_root);
+    emit_rerun_directives();
 
     // ── bindgen: generate the C API bindings ────────────────────────────────
     let wrapper_h = xgb_root.join("include").join("xgboost").join("c_api.h");
@@ -73,6 +75,7 @@ fn main() {
     // prebuilt-binary path. A from-source build is the only way to guarantee a
     // consistent ABI with the consuming Rust binary — in particular the MSVC
     // C runtime on Windows (see FORCE_SHARED_CRT below).
+    let mut macos_libomp: Option<LibOmp> = None;
     let mut dst = cmake::Config::new(&xgb_root);
     dst.generator("Ninja");
     dst.define("CMAKE_BUILD_TYPE", "RelWithDebInfo");
@@ -141,15 +144,30 @@ fn main() {
         // OpenMP is not available from the NDK.
         dst.define("USE_OPENMP", "OFF");
     } else if target.contains("apple") {
-        // macOS: XGBoost's patch_openmp_path_macos() adds a POST_BUILD step that
-        // runs install_name_tool on libxgboost.dylib, but static builds only produce
-        // libxgboost.a, so the command fails. Disabling OpenMP avoids that code path
-        // without modifying the upstream submodule.
-        dst.define("USE_OPENMP", "OFF");
+        match LibOmp::locate_for(&target) {
+            Some(libomp) => {
+                // Apple Silicon macOS: build with OpenMP, linking Homebrew's
+                // static libomp.a so the final binary has no libomp.dylib dependency.
+                libomp.configure(&mut dst, Path::new(&out_dir));
+                macos_libomp = Some(libomp);
+            }
+            None => {
+                // Intel macOS, iOS and friends, or an explicit opt-out: single-threaded.
+                dst.define("USE_OPENMP", "OFF");
+            }
+        }
     } else {
         // Linux: OpenMP is available from the system.
         dst.define("USE_OPENMP", "ON");
     }
+
+    // Lets this crate's own tests assert that the OpenMP choice made above is what
+    // the compiled library reports in XGBuildInfo.
+    let openmp_expected = target.contains("linux") && !target.contains("android") || macos_libomp.is_some();
+    println!(
+        "cargo:rustc-env=XGBOOST_SYS_EXPECT_OPENMP={}",
+        u8::from(openmp_expected)
+    );
 
     let dst = dst.build();
 
@@ -165,6 +183,9 @@ fn main() {
     // reflects the build host.
     if target.contains("apple") {
         println!("cargo:rustc-link-lib=c++");
+        if let Some(libomp) = &macos_libomp {
+            libomp.emit_link_directives();
+        }
     } else if target.contains("android") {
         // libc++ is linked statically so the binary is fully self-contained.
         // cargo:rustc-link-arg does NOT propagate through dependency crates, so
@@ -192,6 +213,105 @@ fn main() {
         println!("cargo:rustc-link-lib=stdc++");
         println!("cargo:rustc-link-lib=stdc++fs");
         println!("cargo:rustc-link-lib=dylib=gomp");
+    }
+}
+
+/// Cargo stops re-running this script on any change to the package as soon as
+/// one `rerun-if-*` directive is emitted, so list everything it depends on.
+fn emit_rerun_directives() {
+    for path in ["build.rs", "omp_override.cmake", "xgboost"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    for var in [LibOmp::PREFIX_ENV, LibOmp::DISABLE_ENV] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+}
+
+/// Homebrew's static OpenMP runtime, used for Apple Silicon macOS builds.
+///
+/// The static `libomp.a` (not the `libomp.dylib` next to it) is linked so the
+/// final executable carries no dependency on an absolute Homebrew path.
+struct LibOmp {
+    prefix: PathBuf,
+}
+
+impl LibOmp {
+    /// Overrides the Homebrew prefix of the `libomp` keg.
+    const PREFIX_ENV: &'static str = "LIBOMP_PREFIX";
+    /// Setting this to anything but empty or `0` builds macOS without OpenMP.
+    const DISABLE_ENV: &'static str = "XGBOOST_SYS_DISABLE_OPENMP";
+    /// Homebrew's keg-only location on Apple Silicon.
+    const DEFAULT_PREFIX: &'static str = "/opt/homebrew/opt/libomp";
+
+    /// Returns the libomp to build against when `target` is Apple Silicon macOS
+    /// and OpenMP has not been disabled, otherwise `None`.
+    ///
+    /// Panics with installation instructions when OpenMP is wanted but missing.
+    fn locate_for(target: &str) -> Option<Self> {
+        // Homebrew's libomp.a is arm64-only, so Intel macOS (and iOS) stay off.
+        if !(target.starts_with("aarch64") && target.ends_with("apple-darwin")) {
+            return None;
+        }
+        if env::var(Self::DISABLE_ENV).is_ok_and(|v| !v.is_empty() && v != "0") {
+            println!(
+                "cargo:warning=OpenMP disabled by {}; XGBoost will be single-threaded",
+                Self::DISABLE_ENV
+            );
+            return None;
+        }
+        let candidates = env::var_os(Self::PREFIX_ENV)
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(Self::brew_prefix())
+            .chain([PathBuf::from(Self::DEFAULT_PREFIX)])
+            .collect::<Vec<_>>();
+        let found = candidates
+            .iter()
+            .find(|p| p.join("lib/libomp.a").is_file() && p.join("include/omp.h").is_file());
+        match found {
+            Some(prefix) => Some(Self { prefix: prefix.clone() }),
+            None => panic!(
+                "OpenMP is enabled for Apple Silicon macOS builds of XGBoost but Homebrew's libomp \
+                 (lib/libomp.a, include/omp.h) was not found in any of {candidates:?}.\n\
+                 Run `brew install libomp`, or set {} to the libomp prefix, \
+                 or set {}=1 to build XGBoost single-threaded.",
+                Self::PREFIX_ENV,
+                Self::DISABLE_ENV,
+            ),
+        }
+    }
+
+    /// The prefix reported by `brew --prefix libomp`, when Homebrew is installed.
+    fn brew_prefix() -> Option<PathBuf> {
+        let out = Command::new("brew").args(["--prefix", "libomp"]).output().ok()?;
+        out.status
+            .success()
+            .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    }
+
+    /// Points XGBoost's CMake at this libomp and neutralizes the dylib-only post-build step.
+    fn configure(&self, dst: &mut cmake::Config, out_dir: &Path) {
+        // Preset the variables XGBoost's find_openmp_macos() would otherwise
+        // discover through `brew --prefix libomp`, but with the static archive.
+        let flags = format!("-Xpreprocessor -fopenmp -I{}", self.prefix.join("include").display());
+        dst.define("USE_OPENMP", "ON");
+        dst.define("OpenMP_C_FLAGS", &flags);
+        dst.define("OpenMP_CXX_FLAGS", &flags);
+        dst.define("OpenMP_C_LIB_NAMES", "omp");
+        dst.define("OpenMP_CXX_LIB_NAMES", "omp");
+        dst.define("OpenMP_omp_LIBRARY", self.prefix.join("lib/libomp.a"));
+        // The submodule must stay unmodified, so skip patch_openmp_path_macos()'s
+        // install_name_tool step from outside; see omp_override.cmake.
+        let include = out_dir.join("omp_override.cmake");
+        fs::write(&include, include_str!("omp_override.cmake"))
+            .unwrap_or_else(|e| panic!("Cannot write {}: {e}", include.display()));
+        dst.define("CMAKE_PROJECT_INCLUDE", &include);
+    }
+
+    /// Links `libomp.a` into the final executable; libxgboost.a leaves the `__kmpc_*` symbols undefined.
+    fn emit_link_directives(&self) {
+        println!("cargo:rustc-link-search=native={}", self.prefix.join("lib").display());
+        println!("cargo:rustc-link-lib=static=omp");
     }
 }
 

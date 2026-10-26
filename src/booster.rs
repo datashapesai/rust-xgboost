@@ -134,7 +134,8 @@ impl Booster {
         // strlen on it. Passing a bare Rust String's bytes (no trailing NUL)
         // makes XGBoost read past the end of the allocation — a crash that page
         // heap surfaces deterministically on Windows.
-        let config = std::ffi::CString::new(format!("{{\"format\":\"{}\"}}", if binary { "ubj" } else { "json" })).unwrap();
+        let config =
+            std::ffi::CString::new(format!("{{\"format\":\"{}\"}}", if binary { "ubj" } else { "json" })).unwrap();
         let mut out_len: xgboost_sys::bst_ulong = 0;
         let mut out_buffer = ptr::null();
         xgb_call!(xgboost_sys::XGBoosterSaveModelToBuffer(
@@ -1352,5 +1353,49 @@ mod tests {
 		6:leaf=0.217203051,cover=22.3283749
 "
         );
+    }
+
+    /// Trains a few `hist` rounds on deterministic synthetic data with `threads` threads.
+    fn train_synthetic(threads: u32) -> Vec<f32> {
+        let (rows, cols) = (2000, 20);
+        let mut state = 12345u64;
+        let mut next = move || {
+            // xorshift64: a fixed pseudo-random sequence without a rand dependency.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let data: Vec<f32> = (0..rows * cols).map(|_| next()).collect();
+        let labels: Vec<f32> = data
+            .chunks(cols)
+            .map(|row| if row[0] + row[1] > 1.0 { 1.0 } else { 0.0 })
+            .collect();
+        let mut dmat = DMatrix::from_dense(&data, rows).unwrap();
+        dmat.set_labels(&labels).unwrap();
+
+        let params = parameters::BoosterParametersBuilder::default()
+            .threads(Some(threads))
+            .build()
+            .unwrap();
+        let mut booster = Booster::new_with_cached_dmats(&params, &[&dmat]).unwrap();
+        booster.set_param("tree_method", "hist").unwrap();
+        booster.set_param("objective", "binary:logistic").unwrap();
+        for iteration in 0..5 {
+            booster.update(&dmat, iteration).unwrap();
+        }
+        booster.predict(&dmat).unwrap()
+    }
+
+    #[test]
+    fn thread_count_does_not_change_the_model() {
+        // With OpenMP compiled in, `threads` sizes the OpenMP team; without it the
+        // setting is accepted and ignored. Either way the result must not depend on it.
+        let single = train_synthetic(1);
+        let multi = train_synthetic(4);
+        assert_eq!(single.len(), multi.len());
+        for (a, b) in single.iter().zip(&multi) {
+            assert!((a - b).abs() < 1e-4, "single-thread {a} vs multi-thread {b}");
+        }
     }
 }

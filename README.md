@@ -30,12 +30,22 @@ Per-platform notes:
 |-----------------|-------------------|----------------------------------------------|
 | Linux x86\_64   | system `libgomp1` | `apt install -y libclang-dev cmake ninja-build` |
 | Linux arm64     | system `libgomp1` | as above                                     |
-| macOS arm64     | Homebrew `libomp` | `brew install libomp cmake ninja llvm`       |
+| macOS arm64     | Homebrew `libomp`, linked statically² | `brew install libomp cmake ninja llvm` |
+| macOS x86\_64   | disabled³         | `brew install cmake ninja llvm`              |
 | Windows x86\_64 | disabled¹         | MSVC, `cmake`, `ninja` on PATH               |
 | Android arm64   | disabled          | `cargo-ndk`; set `ANDROID_NDK_HOME`          |
 
 ¹ MSVC's OpenMP runtime (`vcomp140.dll`) cannot be linked statically, so OpenMP is disabled on
 Windows and XGBoost runs single-threaded there.
+
+² Apple Silicon builds enable OpenMP by default and link Homebrew's `libomp.a`, so the final
+binary does not depend on `libomp.dylib`. The build fails with instructions if
+`brew install libomp` has not been run. Set `LIBOMP_PREFIX` to use a libomp outside Homebrew's
+default location, or `XGBOOST_SYS_DISABLE_OPENMP=1` to build single-threaded. With OpenMP on,
+`BoosterParametersBuilder::threads` (`nthread`) controls the thread count; left unset, XGBoost
+uses every core.
+
+³ Homebrew's `libomp.a` is arm64-only, so Intel macOS builds XGBoost single-threaded.
 
 ## Usage
 

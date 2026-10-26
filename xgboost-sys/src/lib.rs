@@ -14,6 +14,28 @@ pub const COMPILE_VER_PATCH: &str = env!("XGBOOST_VER_PATCH");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
+
+    /// Reads one boolean flag (e.g. `USE_OPENMP`) from the JSON that `XGBuildInfo` returns.
+    fn build_info_flag(flag: &str) -> bool {
+        let mut raw: *const std::os::raw::c_char = std::ptr::null();
+        assert_eq!(unsafe { XGBuildInfo(&mut raw) }, 0);
+        let info = unsafe { CStr::from_ptr(raw) }.to_str().unwrap();
+        let needle = format!("\"{flag}\":");
+        let rest = info
+            .split_once(needle.as_str())
+            .unwrap_or_else(|| panic!("{flag} missing from {info}"))
+            .1;
+        rest.trim_start().starts_with("true")
+    }
+
+    #[test]
+    fn openmp_matches_build_configuration() {
+        // build.rs decides per target whether OpenMP is on (Linux and Apple Silicon
+        // macOS) and exports its decision; the compiled library must agree.
+        let expected = env!("XGBOOST_SYS_EXPECT_OPENMP") == "1";
+        assert_eq!(build_info_flag("USE_OPENMP"), expected);
+    }
 
     #[test]
     fn read_matrix() {
